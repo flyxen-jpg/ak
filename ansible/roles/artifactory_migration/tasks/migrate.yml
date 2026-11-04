@@ -1,0 +1,170 @@
+---
+# Artifact migration with the built-in migration API of Artifact Keeper.
+# The backend pulls every artifact from Artifactory itself and verifies the checksums.
+# Running the play again starts an incremental job (only new or changed files since the
+# last run), which is the way to keep the target in sync until the cut-over.
+
+# Only Artifact Keeper is called here; the backend talks to Artifactory itself.
+- name: Import login tasks
+  ansible.builtin.import_tasks: login_ak.yml
+
+- name: Read existing source connections
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_ak_url }}/api/v1/migrations/connections"
+    headers: "{{ artifactory_migration_ak_auth }}"
+  register: artifactory_migration_connections
+
+- name: Find the connection to Artifactory
+  ansible.builtin.set_fact:
+    artifactory_migration_connection: >-
+      {{ (artifactory_migration_connections.json['items'] | default(artifactory_migration_connections.json))
+         | selectattr('name', 'equalto', artifactory_migration_connection_name) | first | default({}) }}
+
+- name: Create the connection to Artifactory
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_ak_url }}/api/v1/migrations/connections"
+    method: POST
+    headers: "{{ artifactory_migration_ak_auth }}"
+    body_format: json
+    body:
+      name: "{{ artifactory_migration_connection_name }}"
+      url: "{{ artifactory_migration_source_url }}"
+      source_type: artifactory
+      auth_type: basic_auth
+      credentials:
+        username: "{{ artifactory_migration_rt_user }}"
+        password: "{{ artifactory_migration_rt_password }}"
+    status_code: [200, 201]
+  register: artifactory_migration_connection_new
+  when: artifactory_migration_connection.id is not defined
+  changed_when: true
+  no_log: true
+
+- name: Remember the connection ID
+  ansible.builtin.set_fact:
+    artifactory_migration_connection_id: >-
+      {{ artifactory_migration_connection.id | default(artifactory_migration_connection_new.json.id) }}
+
+# Fails early with a clear message when the backend cannot reach the source
+# (network, SSRF allow list, credentials).
+- name: Test the connection from the Artifact Keeper backend
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_ak_url }}/api/v1/migrations/connections/{{ artifactory_migration_connection_id }}/test"
+    method: POST
+    headers: "{{ artifactory_migration_ak_auth }}"
+  register: artifactory_migration_connection_test
+  failed_when: not (artifactory_migration_connection_test.json.success | default(false))
+
+- name: Show the detected source
+  ansible.builtin.debug:
+    msg: "{{ artifactory_migration_connection_test.json.message | default(artifactory_migration_connection_test.json) }}"
+
+# Artifact Keeper cannot create repositories of some package types (Gradle in 1.11.11). Such a
+# repository fails every run and turns jobs without new files into status "failed", so it is
+# left out up front and reported.
+- name: Read repositories of the source
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_ak_url }}/api/v1/migrations/connections/{{ artifactory_migration_connection_id }}/repositories"
+    headers: "{{ artifactory_migration_ak_auth }}"
+  register: artifactory_migration_source_repos
+
+- name: Select migratable repositories
+  vars:
+    artifactory_migration_source_list: >-
+      {{ artifactory_migration_source_repos.json['items'] | default(artifactory_migration_source_repos.json) }}
+  ansible.builtin.set_fact:
+    artifactory_migration_selected: >-
+      {{ artifactory_migration_source_list | selectattr('key', 'in', artifactory_migration_repos)
+         | rejectattr('package_type', 'in', artifactory_migration_unsupported_types) | map(attribute='key') | list }}
+    artifactory_migration_unsupported: >-
+      {{ artifactory_migration_source_list | selectattr('key', 'in', artifactory_migration_repos)
+         | selectattr('package_type', 'in', artifactory_migration_unsupported_types) | map(attribute='key') | list }}
+
+- name: Report repositories that cannot be migrated
+  ansible.builtin.debug:
+    msg: >-
+      Not migrated (package type not supported by Artifact Keeper): {{ artifactory_migration_unsupported | join(', ') }}.
+      Create a Maven repository with the same name in Artifact Keeper and upload the files with Maven, or use repo_mappings.
+  when: artifactory_migration_unsupported | length > 0
+
+- name: Read earlier migration jobs
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_ak_url }}/api/v1/migrations?per_page=100"
+    headers: "{{ artifactory_migration_ak_auth }}"
+  register: artifactory_migration_jobs
+
+# First run: full migration. Later runs: incremental from the start of the last finished job.
+- name: Decide between full and incremental migration
+  vars:
+    artifactory_migration_done: >-
+      {{ (artifactory_migration_jobs.json['items'] | default([]))
+         | selectattr('source_connection_id', 'equalto', artifactory_migration_connection_id)
+         | selectattr('status', 'in', ['completed', 'completed_with_errors', 'partial'])
+         | rejectattr('config.dry_run', 'equalto', true)
+         | sort(attribute='created_at') | list }}
+  ansible.builtin.set_fact:
+    artifactory_migration_job_type: "{{ 'incremental' if artifactory_migration_done | length > 0 else 'full' }}"
+    artifactory_migration_date_from: "{{ (artifactory_migration_done | last).started_at | default(omit) if artifactory_migration_done | length > 0 else omit }}"
+
+- name: Create the migration job
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_ak_url }}/api/v1/migrations"
+    method: POST
+    headers: "{{ artifactory_migration_ak_auth }}"
+    body_format: json
+    body:
+      source_connection_id: "{{ artifactory_migration_connection_id }}"
+      job_type: "{{ artifactory_migration_job_type }}"
+      config: >-
+        {{ {'include_repos': artifactory_migration_selected,
+            'include_cached_remote': true,
+            'conflict_resolution': 'skip',
+            'concurrent_transfers': artifactory_migration_concurrent_transfers,
+            'throttle_delay_ms': 0,
+            'verify_checksums': true}
+           | combine({'date_from': artifactory_migration_date_from} if artifactory_migration_job_type == 'incremental' else {}) }}
+    status_code: [200, 201]
+  register: artifactory_migration_job
+  changed_when: true
+
+- name: Start the migration job
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_ak_url }}/api/v1/migrations/{{ artifactory_migration_job.json.id }}/start"
+    method: POST
+    headers: "{{ artifactory_migration_ak_auth }}"
+    status_code: [200, 202, 204]
+  changed_when: true
+
+- name: Wait for the migration job to finish
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_ak_url }}/api/v1/migrations/{{ artifactory_migration_job.json.id }}"
+    headers: "{{ artifactory_migration_ak_auth }}"
+  register: artifactory_migration_status
+  until: artifactory_migration_status.json.status in ['completed', 'completed_with_errors', 'partial', 'failed', 'cancelled']
+  retries: "{{ (artifactory_migration_timeout | int / 5) | int }}"
+  delay: 5
+
+- name: Read failed items
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_ak_url }}/api/v1/migrations/{{ artifactory_migration_job.json.id }}/items?status=failed&per_page=200"
+    headers: "{{ artifactory_migration_ak_auth }}"
+  register: artifactory_migration_failed
+
+- name: Show migration result
+  ansible.builtin.debug:
+    msg:
+      - "Job {{ artifactory_migration_job_type }}: {{ artifactory_migration_status.json.status }}"
+      - "Items: {{ artifactory_migration_status.json.total_items }} total, {{ artifactory_migration_status.json.completed_items }} transferred,
+        {{ artifactory_migration_status.json.skipped_items }} skipped (identical), {{ artifactory_migration_status.json.failed_items }} failed"
+      - "Data: {{ (artifactory_migration_status.json.transferred_bytes | int / 1048576) | round(1) }} MB"
+      - >-
+        Failed: {{ (artifactory_migration_failed.json['items'] | default([])) | map(attribute='source_path')
+        | list | unique | join(', ') | default('none', true) }}
+
+- name: Fail when the job did not finish
+  ansible.builtin.assert:
+    that: artifactory_migration_status.json.status in ['completed', 'completed_with_errors', 'partial']
+    fail_msg: >-
+      Migration job ended with status {{ artifactory_migration_status.json.status }}:
+      {{ artifactory_migration_status.json.error_summary | default('') }}
+    quiet: true

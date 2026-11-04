@@ -1,0 +1,56 @@
+---
+# Artifact Keeper backend + web UI on every application node (active/active).
+# All state lives outside the containers: PostgreSQL (via HAProxy :5000), artifacts in S3
+# (via HAProxy :3910), search in OpenSearch (via HAProxy :9201). Nodes are interchangeable.
+artifact_keeper_version: 1.11.11
+# The web UI is versioned separately; 1.11.2 is the release matching backend 1.11.11.
+artifact_keeper_web_version: 1.11.2
+artifact_keeper_backend_image: "ghcr.io/artifact-keeper/artifact-keeper-backend:{{ artifact_keeper_version }}"
+artifact_keeper_web_image: "ghcr.io/artifact-keeper/artifact-keeper-web:{{ artifact_keeper_web_version }}"
+
+artifact_keeper_listen_ip: "{{ ak_cluster_ip }}"
+artifact_keeper_backend_port: 8080
+artifact_keeper_web_port: 3000
+artifact_keeper_config_dir: /etc/artifact-keeper
+artifact_keeper_external_url: "{{ ak_external_url }}"
+artifact_keeper_cors_origins:
+  - "{{ ak_external_url }}"
+  - "http://ak.{{ ak_domain }}"
+
+# Local HAProxy endpoints (always the healthy/primary instance).
+artifact_keeper_database_user: "{{ patroni_app_user | default('registry') }}"
+artifact_keeper_database_name: "{{ patroni_app_database | default('artifact_registry') }}"
+artifact_keeper_database_url: >-
+  postgresql://{{ artifact_keeper_database_user }}:{{ patroni_app_password | urlencode }}@{{
+  artifact_keeper_listen_ip }}:5000/{{ artifact_keeper_database_name }}?sslmode=require
+artifact_keeper_database_max_connections: 20
+artifact_keeper_database_min_connections: 2
+artifact_keeper_s3_endpoint: "http://{{ artifact_keeper_listen_ip }}:3910"
+artifact_keeper_s3_bucket: "{{ garage_bucket | default('artifact-keeper') }}"
+artifact_keeper_s3_region: "{{ garage_s3_region | default('garage') }}"
+artifact_keeper_opensearch_url: "http://{{ artifact_keeper_listen_ip }}:9201"
+
+# Trust X-Forwarded-For only from the cluster network (HAProxy); needed for per-client
+# rate limiting behind the load balancer.
+artifact_keeper_trusted_proxy_cidrs: "{{ ak_cluster_network }}"
+# Private addresses Artifact Keeper may connect to (SSRF protection). Needed e.g. for a
+# migration source in the internal network; keep as narrow as possible. Empty = none.
+artifact_keeper_ssrf_allow_private_cidrs: ""
+artifact_keeper_log_level: info
+# Additional environment variables (dict) for the backend.
+artifact_keeper_extra_env: {}
+
+# Zero-downtime restarts: before restarting a node, take it out of every HAProxy and wait for
+# running requests; put it back once /readyz is 200 again. Measured in the lab: 0 errors.
+artifact_keeper_drain_on_restart: true
+artifact_keeper_drain_wait: 5
+artifact_keeper_haproxy_group: ak_app
+artifact_keeper_haproxy_socket: /var/lib/haproxy/stats
+
+# Required secrets (vault): artifact_keeper_admin_password, artifact_keeper_jwt_secret,
+# artifact_keeper_webhook_secret_key, artifact_keeper_migration_encryption_key,
+# artifact_keeper_sso_encryption_key, garage_access_key_id, garage_secret_access_key,
+# patroni_app_password. All nodes MUST use identical values (tokens are valid cluster-wide).
+# The three *_key values must be Base64 of exactly 32 bytes (openssl rand -base64 32).
+
+artifact_keeper_firewall_zone: "{{ ak_firewall_zone }}"

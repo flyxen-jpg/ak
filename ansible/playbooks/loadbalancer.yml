@@ -1,0 +1,16 @@
+---
+- name: Deploy HAProxy and keepalived
+  hosts: ak_app
+  gather_facts: true
+  pre_tasks:
+    # keepalived needs the cluster interface even when this playbook runs on its own.
+    - name: Detect cluster interface
+      ansible.builtin.include_role:
+        name: base
+        tasks_from: network_facts.yml
+      tags: [always]
+  roles:
+    - role: haproxy
+      tags: [haproxy]
+    - role: keepalived
+      tags: [keepalived]

@@ -1,0 +1,20 @@
+---
+# Online only. In offline mode the same packages come from the bundle repository.
+
+- name: Install EPEL repository
+  become: true
+  ansible.builtin.dnf:
+    name: "{{ patroni_epel_package }}"
+    state: present
+
+- name: Import PGDG signing key
+  become: true
+  ansible.builtin.rpm_key:
+    key: "{{ patroni_pgdg_gpg_key_url }}"
+    state: present
+
+- name: Install PGDG repository
+  become: true
+  ansible.builtin.dnf:
+    name: "{{ patroni_pgdg_repo_rpm_url }}"
+    state: present

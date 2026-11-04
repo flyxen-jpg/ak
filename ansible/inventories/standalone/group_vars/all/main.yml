@@ -1,0 +1,20 @@
+---
+# Environment settings: single host, NAT only, internet access through NAT.
+
+# Packages and images come from the public mirrors and registries.
+# (The offline bundle of the cluster setup does not contain the standalone images.)
+ak_offline: false
+
+# Install Artifactory OSS next to Artifact Keeper (migration source, lab and test use).
+standalone_artifactory_enabled: true
+
+# Address under which users reach the web interfaces. With NAT only, the VM is reachable
+# from the host through VirtualBox port forwarding (Settings, Network, Port Forwarding),
+# e.g. host port 30080 to guest port 30080. Change to the real name in production.
+ak_standalone_external_url: "http://localhost:30080"
+
+# Migration (playbooks/artifactory_seed.yml and migrate.yml), run on this host.
+artifactory_migration_ak_url: "http://127.0.0.1:30080"
+artifactory_migration_rt_url: "http://127.0.0.1:8082"
+# Address the Artifact Keeper backend uses: Artifactory's fixed IP in its container network.
+artifactory_migration_source_url: "http://10.89.41.10:8082/artifactory"

@@ -1,0 +1,22 @@
+---
+# Images first, on all nodes in parallel (the backend image is ~3.7 GB). The rollout below
+# runs node by node and would otherwise download one node after the other.
+- name: Provide Artifact Keeper images
+  hosts: ak_app
+  gather_facts: true
+  tasks:
+    - name: Pull or load backend and web images
+      ansible.builtin.include_role:
+        name: artifact_keeper
+        tasks_from: images.yml
+      tags: [artifact_keeper]
+
+# serial: 1 - one node at a time. On first install only one node runs the database
+# migrations; on updates the other node keeps serving (rolling update, see handlers).
+- name: Deploy Artifact Keeper
+  hosts: ak_app
+  gather_facts: true
+  serial: 1
+  roles:
+    - role: artifact_keeper
+      tags: [artifact_keeper]

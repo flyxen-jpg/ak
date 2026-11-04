@@ -1,0 +1,64 @@
+---
+# PostgreSQL with Patroni for automatic failover. Patroni runs as a systemd service on the
+# host (PGDG packages): the database is the most critical component and should not depend
+# on the container runtime.
+patroni_pg_major: 18
+patroni_packages:
+  - "postgresql{{ patroni_pg_major }}-server"
+  - "postgresql{{ patroni_pg_major }}-contrib"
+  - patroni
+  - patroni-etcd
+
+# Online installation only: repositories that provide the packages above.
+# EPEL supplies Python dependencies of Patroni (python3-etcd, python3-ydiff ...).
+patroni_pgdg_gpg_key_url: https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL
+patroni_pgdg_repo_rpm_url: "{{ patroni_pgdg_base_url }}/EL-{{ patroni_el_version }}-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+patroni_pgdg_base_url: https://download.postgresql.org/pub/repos/yum/reporpms
+patroni_el_version: "{{ ansible_facts['distribution_major_version'] | default('10') }}"
+patroni_epel_package: epel-release
+
+patroni_scope: ak-pg
+patroni_namespace: /db/
+patroni_name: "{{ inventory_hostname }}"
+patroni_listen_ip: "{{ ak_cluster_ip }}"
+patroni_pg_port: 5432
+patroni_rest_port: 8008
+# etcd members used as DCS.
+patroni_etcd_group: ak_cluster
+patroni_etcd_port: 2379
+
+patroni_data_dir: "/var/lib/pgsql/{{ patroni_pg_major }}/data"
+patroni_bin_dir: "/usr/pgsql-{{ patroni_pg_major }}/bin"
+patroni_config_dir: /etc/patroni
+patroni_ssl_dir: /var/lib/pgsql/ssl
+
+# Failover timing: a crashed primary is replaced after at most ttl seconds.
+# Lower values (ttl 20 / loop_wait 5 / retry_timeout 5) fail over faster but react to
+# short network hiccups.
+patroni_ttl: 30
+patroni_loop_wait: 10
+patroni_retry_timeout: 10
+patroni_maximum_lag_on_failover: 1048576
+# true = no data loss on failover, but writes stop when the only replica is down.
+patroni_synchronous_mode: false
+
+patroni_pg_parameters:
+  max_connections: 200
+  shared_buffers: 128MB
+  wal_level: replica
+  hot_standby: "on"
+  max_wal_senders: 10
+  max_replication_slots: 10
+  wal_keep_size: 256MB
+  wal_log_hints: "on"
+  password_encryption: scram-sha-256
+
+# Application database created once by the first leader (post_bootstrap).
+patroni_app_user: registry
+patroni_app_database: artifact_registry
+
+# Required secrets (define in the vault):
+#   patroni_superuser_password, patroni_replication_password, patroni_app_password
+# Note: they are applied at cluster bootstrap. Changing them later needs ALTER ROLE as well.
+
+patroni_firewall_zone: "{{ ak_firewall_zone }}"

@@ -1,0 +1,81 @@
+---
+# Checks for the problems that typically break a container setup on a fresh machine.
+# Every failure message says what to change, so the play never stops with a cryptic error.
+
+- name: Check operating system and architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] == 'RedHat'
+      - ansible_facts['distribution_major_version'] == '10'
+      - ansible_facts['architecture'] == 'x86_64'
+    fail_msg: >-
+      Rocky Linux / RHEL 10 on x86_64 required, found {{ ansible_facts['distribution'] }}
+      {{ ansible_facts['distribution_version'] }} ({{ ansible_facts['architecture'] }}).
+    quiet: true
+
+- name: Check memory
+  ansible.builtin.assert:
+    that: ansible_facts['memtotal_mb'] | int >= standalone_host_min_memory_mb | int
+    fail_msg: >-
+      {{ ansible_facts['memtotal_mb'] }} MB RAM, at least {{ standalone_host_min_memory_mb }} MB needed
+      (Artifactory enabled: {{ standalone_artifactory_enabled | default(true) }}). Give the VM more memory
+      or set standalone_artifactory_enabled=false.
+    quiet: true
+
+- name: Check CPU count
+  ansible.builtin.assert:
+    that: ansible_facts['processor_vcpus'] | int >= standalone_host_min_cpus | int
+    fail_msg: "{{ ansible_facts['processor_vcpus'] }} vCPU, at least {{ standalone_host_min_cpus }} needed."
+    quiet: true
+
+- name: Determine the file system that holds container data
+  ansible.builtin.set_fact:
+    standalone_host_data_mount: >-
+      {{ ansible_facts['mounts']
+         | selectattr('mount', 'in', [standalone_host_data_path, '/'])
+         | sort(attribute='mount') | last }}
+
+- name: Check free disk space
+  ansible.builtin.assert:
+    that: (standalone_host_data_mount.size_available / 1024**3) >= standalone_host_min_free_gb | float
+    fail_msg: >-
+      Only {{ (standalone_host_data_mount.size_available / 1024**3) | round(1) }} GB free on
+      {{ standalone_host_data_mount.mount }}, at least {{ standalone_host_min_free_gb }} GB needed for images and data.
+    quiet: true
+
+# Rootless Podman needs cgroup v2 for resource limits and systemd integration (default on EL10).
+- name: Check cgroup version
+  ansible.builtin.stat:
+    path: /sys/fs/cgroup/cgroup.controllers
+  register: standalone_host_cgroup2
+
+- name: Require cgroup v2
+  ansible.builtin.assert:
+    that: standalone_host_cgroup2.stat.exists
+    fail_msg: cgroup v2 is not mounted. Remove systemd.unified_cgroup_hierarchy=0 from the kernel command line.
+    quiet: true
+
+# A missing default route or DNS is the most common reason for "image pull" failures in VMs.
+- name: Check that the container registries are reachable
+  ansible.builtin.uri:
+    url: "{{ item }}"
+    method: GET
+    status_code: [200, 401]
+    timeout: 15
+  loop: "{{ standalone_host_registry_urls }}"
+  register: standalone_host_registry_check
+  when: not ak_offline | bool
+  # Evaluated in the next task, which reports all unreachable registries at once.
+  failed_when: false
+
+- name: Stop if a registry cannot be reached
+  vars:
+    standalone_host_unreachable: >-
+      {{ standalone_host_registry_check.results | rejectattr('status', 'in', [200, 401]) | map(attribute='item') | list }}
+  ansible.builtin.assert:
+    that: standalone_host_unreachable | length == 0
+    fail_msg: >-
+      Cannot reach {{ standalone_host_unreachable | join(', ') }}.
+      Check the NAT adapter, DNS (/etc/resolv.conf) and any proxy.
+    quiet: true
+  when: not ak_offline | bool

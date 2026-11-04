@@ -1,0 +1,18 @@
+---
+# Quorum services on all three nodes. Each tolerates the loss of one member.
+#
+# First installation: all nodes at once (default), because a new etcd cluster only becomes
+# healthy when the members start together.
+# Changes on a running cluster: -e infrastructure_serial=1 - one node at a time, the health
+# checks of each role then wait until the node has rejoined before the next one is touched.
+- name: Deploy etcd, Garage and OpenSearch
+  hosts: ak_cluster
+  gather_facts: true
+  serial: "{{ infrastructure_serial | default('100%') }}"
+  roles:
+    - role: etcd
+      tags: [etcd]
+    - role: garage
+      tags: [garage]
+    - role: opensearch
+      tags: [opensearch]

@@ -1,0 +1,7 @@
+---
+- name: Deploy PostgreSQL with Patroni
+  hosts: ak_app
+  gather_facts: true
+  roles:
+    - role: patroni
+      tags: [patroni]

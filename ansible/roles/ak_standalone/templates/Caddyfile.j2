@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+#
+# Same routing as the upstream Caddyfile: API, health and package endpoints go to the
+# backend, everything else to the web UI. Plain HTTP on port 80 inside the container;
+# put TLS in front (or extend this file) for production.
+{
+	auto_https off
+	admin off
+}
+
+:80 {
+	@backend path /api/* /health /healthz /livez /readyz /ready /metrics /swagger-ui* /v2 /v2/* /general/* /maven/* /npm/* /pypi/* /nuget/* /cargo/* /gems/* /go/* /helm/* /debian/* /rpm/* /alpine/* /pacman/* /composer/* /conan/* /conda/* /t/* /swift/* /terraform/* /cocoapods/* /hex/* /pub/* /lfs/* /ivy/* /chef/* /puppet/* /ansible/* /cran/* /bazel/* /huggingface/* /jetbrains/* /vscode/* /proto/* /incus/* /lxc/* /ext/*
+	reverse_proxy @backend ak-backend:8080
+	reverse_proxy ak-web:3000
+}

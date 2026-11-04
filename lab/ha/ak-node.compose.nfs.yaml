@@ -1,0 +1,6 @@
+# Overlay fuer die NFS-Variante: Artefakte auf dem gemeinsamen NFS-Mount statt in S3.
+# (kein :Z - SELinux-Labels sind auf NFS nicht moeglich; noetig ist virt_use_nfs=on)
+services:
+  backend:
+    volumes:
+      - /srv/ak-nfs:/data/storage

@@ -1,0 +1,22 @@
+---
+# Detects the interface carrying ak_cluster_ip and stores it as fact base_cluster_interface.
+# Included by main.yml and by playbooks that need the fact without running the whole role.
+# Derived instead of configured, so the same roles work with VirtualBox (enp0s8),
+# VMware (ens192) or bare metal (bond0) without changes.
+- name: Detect the network interface that carries the cluster IP
+  ansible.builtin.set_fact:
+    base_cluster_interface: >-
+      {{ ansible_facts['interfaces']
+         | map('regex_replace', '-', '_')
+         | map('extract', ansible_facts)
+         | selectattr('ipv4', 'defined')
+         | selectattr('ipv4.address', 'equalto', ak_cluster_ip)
+         | map(attribute='device')
+         | first | default('') }}
+    cacheable: true
+
+- name: Verify that the cluster IP is configured on this host
+  ansible.builtin.assert:
+    that: base_cluster_interface | length > 0
+    fail_msg: "No interface carries ak_cluster_ip={{ ak_cluster_ip }}. Configure the network first."
+    quiet: true

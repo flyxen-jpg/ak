@@ -1,0 +1,31 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+[Unit]
+Description=etcd member {{ etcd_name }} (DCS for Patroni)
+
+[Container]
+ContainerName=etcd
+Image={{ etcd_image }}
+Pull=never
+# Host network: members must advertise and reach the real cluster IPs.
+Network=host
+Volume=etcd-data:/etcd-data
+Exec=/usr/local/bin/etcd \
+  --name {{ etcd_name }} \
+  --data-dir /etcd-data \
+  --listen-client-urls http://{{ etcd_listen_ip }}:{{ etcd_client_port }},http://127.0.0.1:{{ etcd_client_port }} \
+  --advertise-client-urls http://{{ etcd_listen_ip }}:{{ etcd_client_port }} \
+  --listen-peer-urls http://{{ etcd_listen_ip }}:{{ etcd_peer_port }} \
+  --initial-advertise-peer-urls http://{{ etcd_listen_ip }}:{{ etcd_peer_port }} \
+  --initial-cluster {% for h in groups[etcd_group] %}{{ hostvars[h]['etcd_name'] | default(h) }}=http://{{ hostvars[h]['ak_cluster_ip'] }}:{{ etcd_peer_port }}{{ ',' if not loop.last }}{% endfor %} \
+  --initial-cluster-state new \
+  --initial-cluster-token {{ etcd_cluster_token }} \
+  --heartbeat-interval {{ etcd_heartbeat_interval }} \
+  --election-timeout {{ etcd_election_timeout }}
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

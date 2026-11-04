@@ -1,0 +1,77 @@
+---
+- name: Verify keepalived settings
+  ansible.builtin.assert:
+    that:
+      - keepalived_auth_pass | length > 0
+      - keepalived_auth_pass | length <= 8
+      - keepalived_interface | length > 0
+    fail_msg: keepalived_auth_pass (1-8 chars) and keepalived_interface must be set.
+    quiet: true
+
+- name: Install keepalived
+  become: true
+  ansible.builtin.dnf:
+    name: "{{ keepalived_packages }}"
+    state: present
+
+- name: Allow VRRP between the cluster nodes
+  become: true
+  ansible.posix.firewalld:
+    zone: "{{ keepalived_firewall_zone }}"
+    rich_rule: rule protocol value="vrrp" accept
+    permanent: true
+    immediate: true
+    state: enabled
+
+- name: Check whether this node already holds the VIP
+  ansible.builtin.command: ip -4 -o addr show dev {{ keepalived_interface }}
+  register: keepalived_addr
+  changed_when: false
+
+# Duplicate address detection. A VIP that is already in use elsewhere (in VirtualBox e.g. the
+# host-only DHCP server) is reachable for some clients only - hard to diagnose later.
+- name: Check that no foreign host answers for the VIP
+  become: true
+  ansible.builtin.command: arping -D -c 2 -w 3 -I {{ keepalived_interface }} {{ keepalived_vip }}
+  register: keepalived_arping
+  changed_when: false
+  failed_when: false
+  when:
+    - keepalived_preflight_check
+    - (' ' ~ keepalived_vip ~ '/') not in keepalived_addr.stdout
+
+# A reply from a peer node is fine: it holds the VIP already (re-run on a running cluster).
+- name: Collect MAC addresses of the peer nodes
+  ansible.builtin.set_fact:
+    keepalived_peer_macs: >-
+      {{ keepalived_peer_macs | default([]) +
+         [hostvars[item]['ansible_facts'][hostvars[item]['base_cluster_interface'] | regex_replace('-', '_')]['macaddress'] | lower] }}
+  loop: "{{ groups[keepalived_group] | difference([inventory_hostname]) }}"
+  when: keepalived_arping.rc | default(0) != 0
+
+- name: Abort on VIP conflict
+  vars:
+    keepalived_reply_macs: >-
+      {{ keepalived_arping.stdout | regex_findall('\[([0-9A-Fa-f:]+)\]') | map('lower') | unique | list }}
+  ansible.builtin.assert:
+    that: keepalived_reply_macs | difference(keepalived_peer_macs) | length == 0
+    fail_msg: "VIP {{ keepalived_vip }} is already answered by another host: {{ keepalived_arping.stdout }}"
+    quiet: true
+  when: keepalived_arping.rc | default(0) != 0
+
+- name: Write keepalived configuration
+  become: true
+  ansible.builtin.template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart keepalived
+
+- name: Start keepalived
+  become: true
+  ansible.builtin.systemd_service:
+    name: keepalived
+    state: started
+    enabled: true

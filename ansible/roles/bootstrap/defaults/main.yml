@@ -1,0 +1,14 @@
+---
+# First contact with a freshly installed Rocky Linux node (installed by hand, DHCP, an
+# administrator account whose sudo still asks for a password). Run once with -K.
+
+# Allow the Ansible account to use sudo without password (needed for unattended runs).
+bootstrap_passwordless_sudo: true
+bootstrap_sudoers_file: /etc/sudoers.d/90-ansible
+
+# Turn the address received by DHCP into a static configuration. Cluster members, the VIP
+# and the inventory refer to fixed IPs; a changed DHCP lease would break the cluster.
+bootstrap_static_ip: true
+
+# Set the host name to the inventory name.
+bootstrap_set_hostname: true

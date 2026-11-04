@@ -1,0 +1,91 @@
+---
+# Independent check of the migration: list every file in Artifactory (AQL, available in OSS),
+# download it from Artifact Keeper through the native endpoints (the way build tools do) and
+# compare the SHA-256. get_url fails on a checksum mismatch, which is counted per file.
+
+- name: List all files in Artifactory
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_rt_url }}/artifactory/api/search/aql"
+    method: POST
+    url_username: "{{ artifactory_migration_rt_user }}"
+    url_password: "{{ artifactory_migration_rt_password }}"
+    force_basic_auth: true
+    headers:
+      Content-Type: text/plain
+    body: >-
+      items.find({"type":"file","repo":{"$match":"*"}}).include("repo","path","name","size","sha256")
+  register: artifactory_migration_aql
+
+# Remote caches are called "<repo>-cache" in Artifactory and "<repo>" in Artifact Keeper.
+- name: Build the list of files to compare
+  ansible.builtin.set_fact:
+    artifactory_migration_manifest: >-
+      {%- set out = [] -%}
+      {%- for f in artifactory_migration_aql.json.results -%}
+      {%- set key = f.repo | regex_replace('-cache$', '') -%}
+      {%- if key in artifactory_migration_repos -%}
+      {%- set _ = out.append({'repo': key, 'path': (f.name if f.path == '.' else f.path ~ '/' ~ f.name), 'name': f.name,
+           'sha256': f.sha256, 'endpoint': 'general' if key == 'generic-files' else 'maven'}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Separate known differences
+  ansible.builtin.set_fact:
+    artifactory_migration_compare: >-
+      {{ artifactory_migration_manifest | rejectattr('repo', 'in', artifactory_migration_verify_skip_repos)
+         | rejectattr('name', 'in', artifactory_migration_verify_skip_names) | list }}
+    artifactory_migration_known_gaps: >-
+      {{ artifactory_migration_manifest | selectattr('repo', 'in', artifactory_migration_verify_skip_repos) | list
+         + artifactory_migration_manifest | selectattr('name', 'in', artifactory_migration_verify_skip_names) | list }}
+
+- name: Create download directory
+  become: true
+  ansible.builtin.file:
+    path: "{{ artifactory_migration_verify_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Download every file from Artifact Keeper and compare the checksum
+  become: true
+  ansible.builtin.get_url:
+    url: "{{ artifactory_migration_ak_url }}/{{ item.endpoint }}/{{ item.repo }}/{{ item.path }}"
+    dest: "{{ artifactory_migration_verify_dir }}/{{ item.repo }}_{{ item.path | regex_replace('/', '_') }}"
+    checksum: "sha256:{{ item.sha256 }}"
+    url_username: "{{ artifactory_migration_ak_user }}"
+    url_password: "{{ artifactory_migration_ak_password }}"
+    force_basic_auth: true
+    force: true
+    mode: "0600"
+  loop: "{{ artifactory_migration_compare }}"
+  loop_control:
+    label: "{{ item.repo }}/{{ item.path }}"
+  register: artifactory_migration_downloads
+  # Evaluated below; the summary lists every mismatch instead of stopping at the first.
+  failed_when: false
+  changed_when: false
+
+- name: Remove downloaded copies
+  become: true
+  ansible.builtin.file:
+    path: "{{ artifactory_migration_verify_dir }}"
+    state: absent
+
+- name: Show verification result
+  vars:
+    artifactory_migration_bad: "{{ artifactory_migration_downloads.results | selectattr('failed', 'defined') | selectattr('failed') | list }}"
+  ansible.builtin.debug:
+    msg:
+      - >-
+        Compared: {{ artifactory_migration_compare | length }} files,
+        identical: {{ artifactory_migration_compare | length - artifactory_migration_bad | length }}
+      - "Missing or different: {{ artifactory_migration_bad | map(attribute='item') | map(attribute='path') | list }}"
+      - >-
+        Known gaps, not compared: {{ artifactory_migration_known_gaps | map(attribute='repo')
+        | zip(artifactory_migration_known_gaps | map(attribute='path')) | map('join', '/') | list }}
+
+- name: Fail on missing or different files
+  ansible.builtin.assert:
+    that: artifactory_migration_downloads.results | selectattr('failed', 'defined') | selectattr('failed') | list | length == 0
+    fail_msg: Some migrated files are missing or differ from the source (see above).
+    quiet: true

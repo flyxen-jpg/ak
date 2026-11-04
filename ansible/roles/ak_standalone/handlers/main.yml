@@ -1,0 +1,13 @@
+---
+# Single host: a short interruption is unavoidable; units restart in dependency order.
+- name: Restart artifact keeper stack
+  become: true
+  become_user: "{{ podman_user }}"
+  ansible.builtin.systemd_service:
+    name: "{{ item }}.service"
+    scope: user
+    state: restarted
+    daemon_reload: true
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ podman_user_uid }}"
+  loop: "{{ ak_standalone_units }}"

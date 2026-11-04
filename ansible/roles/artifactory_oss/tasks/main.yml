@@ -1,0 +1,95 @@
+---
+- name: Verify that the secrets are defined
+  ansible.builtin.assert:
+    that:
+      - artifactory_oss_db_password | length >= 12
+      - artifactory_oss_admin_password | length >= 12
+    fail_msg: artifactory_oss_db_password and artifactory_oss_admin_password (12+ characters) must be set.
+    quiet: true
+  no_log: true
+
+- name: Open the web port
+  become: true
+  ansible.posix.firewalld:
+    zone: "{{ item }}"
+    port: "{{ artifactory_oss_http_port }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ artifactory_oss_firewall_zones }}"
+
+- name: Provide container images
+  ansible.builtin.include_role:
+    name: podman
+    tasks_from: image.yml
+  vars:
+    podman_image: "{{ item }}"
+  loop:
+    - "{{ artifactory_oss_postgres_image }}"
+    - "{{ artifactory_oss_image }}"
+
+- name: Create configuration directory
+  become: true
+  ansible.builtin.file:
+    path: "{{ artifactory_oss_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ podman_user }}"
+    mode: "0750"
+
+- name: Write environment files
+  become: true
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ artifactory_oss_config_dir }}/{{ item }}"
+    owner: root
+    group: "{{ podman_user }}"
+    mode: "0640"
+  loop:
+    - postgres.env
+    - artifactory.env
+  notify: Restart artifactory
+
+- name: Install Quadlet units
+  become: true
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ podman_quadlet_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - artifactory.network
+    - artifactory-postgres.container
+    - artifactory.container
+  notify: Restart artifactory
+
+- name: Apply pending restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Start Artifactory
+  become: true
+  become_user: "{{ podman_user }}"
+  ansible.builtin.systemd_service:
+    name: "{{ item }}.service"
+    scope: user
+    state: started
+    daemon_reload: true
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ podman_user_uid }}"
+  loop: "{{ artifactory_oss_units }}"
+
+# Artifactory (Java, several micro services) needs 2 to 5 minutes for its first start.
+- name: Wait until Artifactory reports healthy
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ artifactory_oss_http_port }}/router/api/v1/system/health"
+    return_content: true
+  register: artifactory_oss_health
+  until:
+    - artifactory_oss_health.status == 200
+    - artifactory_oss_health.json.router.state | default('') == 'HEALTHY'
+  retries: 90
+  delay: 5
+
+- name: Import admin password tasks
+  ansible.builtin.import_tasks: admin_password.yml

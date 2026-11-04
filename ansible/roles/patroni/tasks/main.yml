@@ -1,0 +1,122 @@
+---
+- name: Import repository tasks (online installation only)
+  ansible.builtin.import_tasks: repositories.yml
+  when: not ak_offline
+
+- name: Install PostgreSQL and Patroni
+  become: true
+  ansible.builtin.dnf:
+    name: "{{ patroni_packages }}"
+    state: present
+
+- name: Open PostgreSQL and Patroni ports in the cluster zone
+  become: true
+  ansible.posix.firewalld:
+    zone: "{{ patroni_firewall_zone }}"
+    port: "{{ item }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - "{{ patroni_pg_port }}"
+    - "{{ patroni_rest_port }}"
+
+- name: Create TLS directory
+  become: true
+  ansible.builtin.file:
+    path: "{{ patroni_ssl_dir }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0700"
+
+# Self-signed certificate: encrypts client and replication traffic. Replace with a
+# certificate from the internal CA for production (same file names).
+- name: Create self-signed server certificate
+  become: true
+  ansible.builtin.command: >-
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650
+    -keyout {{ patroni_ssl_dir }}/server.key -out {{ patroni_ssl_dir }}/server.crt
+    -subj "/CN={{ patroni_name }}.{{ ak_domain }}"
+    -addext "subjectAltName=DNS:{{ patroni_name }}.{{ ak_domain }},IP:{{ patroni_listen_ip }},IP:{{ ak_vip }}"
+  args:
+    creates: "{{ patroni_ssl_dir }}/server.crt"
+
+- name: Hand certificate and key to the postgres user
+  become: true
+  ansible.builtin.file:
+    path: "{{ patroni_ssl_dir }}/{{ item.name }}"
+    owner: postgres
+    group: postgres
+    mode: "{{ item.mode }}"
+  loop:
+    - name: server.crt
+      mode: "0644"
+    - name: server.key
+      mode: "0600"
+
+- name: Create Patroni configuration directory
+  become: true
+  ansible.builtin.file:
+    path: "{{ patroni_config_dir }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0750"
+
+- name: Install post-bootstrap script (creates application role and database)
+  become: true
+  ansible.builtin.template:
+    src: post_bootstrap.sh.j2
+    dest: "{{ patroni_config_dir }}/post_bootstrap.sh"
+    owner: postgres
+    group: postgres
+    mode: "0700"
+
+- name: Write Patroni configuration
+  become: true
+  ansible.builtin.template:
+    src: patroni.yml.j2
+    dest: "{{ patroni_config_dir }}/patroni.yml"
+    owner: postgres
+    group: postgres
+    mode: "0600"
+  notify: Reload patroni
+
+# Start one node first: it initialises the database and becomes leader. The others then
+# clone from it. Starting all at once works too, but makes the first leader random.
+- name: Start Patroni on the first node
+  become: true
+  ansible.builtin.systemd_service:
+    name: patroni.service
+    state: started
+    enabled: true
+  when: inventory_hostname == ansible_play_hosts[0]
+
+- name: Wait for a Patroni leader
+  ansible.builtin.uri:
+    url: "http://{{ patroni_listen_ip }}:{{ patroni_rest_port }}/cluster"
+  register: patroni_cluster
+  until: patroni_cluster.json is defined and (patroni_cluster.json.members | selectattr('role', 'equalto', 'leader') | list | length) == 1
+  retries: 30
+  delay: 5
+  run_once: true
+
+- name: Start Patroni on the remaining nodes
+  become: true
+  ansible.builtin.systemd_service:
+    name: patroni.service
+    state: started
+    enabled: true
+
+- name: Wait until all replicas are streaming
+  ansible.builtin.uri:
+    url: "http://{{ patroni_listen_ip }}:{{ patroni_rest_port }}/cluster"
+  register: patroni_members
+  until: >-
+    patroni_members.json is defined and
+    (patroni_members.json.members | selectattr('state', 'in', ['running', 'streaming']) | list | length)
+    == ansible_play_hosts | length
+  retries: 60
+  delay: 5
+  run_once: true

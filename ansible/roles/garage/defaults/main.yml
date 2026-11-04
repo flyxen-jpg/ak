@@ -1,0 +1,29 @@
+---
+# Garage provides the S3-compatible object storage for artifacts.
+# replication_factor 3 keeps a full copy on every node: any single node may fail.
+garage_image: docker.io/dxflrs/garage:v2.5.0
+garage_group: ak_cluster
+garage_listen_ip: "{{ ak_cluster_ip }}"
+garage_replication_factor: 3
+garage_s3_port: 3900
+garage_rpc_port: 3901
+garage_admin_port: 3903
+garage_s3_region: garage
+# Placement zone per node; one zone per node spreads the three copies over all nodes.
+garage_zone: "dc{{ groups[garage_group].index(inventory_hostname) + 1 }}"
+# Capacity advertised to the layout (relative weight for data placement, not a quota).
+garage_capacity: 20G
+garage_config_dir: /etc/garage
+
+# Bucket and access key for Artifact Keeper. The key is imported with a pre-defined ID and
+# secret (from the vault), so all nodes know it without passing generated values around.
+garage_bucket: artifact-keeper
+garage_key_name: ak-backend
+
+# Required secrets (define in the vault):
+#   garage_rpc_secret         64 hex characters, shared by all nodes
+#   garage_admin_token        admin/metrics API token
+#   garage_access_key_id      "GK" + 24 hex characters
+#   garage_secret_access_key  64 hex characters
+
+garage_firewall_zone: "{{ ak_firewall_zone }}"

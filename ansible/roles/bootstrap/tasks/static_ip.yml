@@ -1,0 +1,50 @@
+---
+# Pins the current DHCP lease as static configuration of the same NetworkManager profile.
+# The address does not change, so the running SSH connection of Ansible survives.
+# nmcli is used because the NetworkManager module lives in community.general, which the
+# project avoids as an extra dependency.
+
+- name: Find the interface that carries the inventory address
+  ansible.builtin.set_fact:
+    bootstrap_interface: >-
+      {{ ansible_facts['interfaces'] | map('regex_replace', '-', '_') | map('extract', ansible_facts)
+         | selectattr('ipv4', 'defined') | selectattr('ipv4.address', 'equalto', ansible_host)
+         | first }}
+
+- name: Read the NetworkManager profile of the interface
+  ansible.builtin.command: nmcli -g GENERAL.CONNECTION device show {{ bootstrap_interface.device }}
+  register: bootstrap_connection
+  changed_when: false
+
+- name: Read the current IPv4 method
+  ansible.builtin.command: nmcli -g ipv4.method connection show "{{ bootstrap_connection.stdout }}"
+  register: bootstrap_method
+  changed_when: false
+
+- name: Configure the current address statically
+  become: true
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - modify
+      - "{{ bootstrap_connection.stdout }}"
+      - ipv4.method
+      - manual
+      - ipv4.addresses
+      - "{{ ansible_host }}/{{ bootstrap_interface.ipv4.prefix }}"
+      - ipv4.gateway
+      - "{{ ansible_facts['default_ipv4']['gateway'] }}"
+      - ipv4.dns
+      - "{{ ansible_facts['dns']['nameservers'] | join(',') }}"
+  when: bootstrap_method.stdout == 'auto'
+  register: bootstrap_modified
+  changed_when: true
+
+# Re-applying the same address keeps established connections alive. Not a handler: the
+# following plays need the final configuration, and a handler would run only at the end.
+- name: Activate the static configuration # noqa: no-handler
+  become: true
+  ansible.builtin.command: nmcli device reapply {{ bootstrap_interface.device }}
+  when: bootstrap_modified is changed
+  changed_when: true

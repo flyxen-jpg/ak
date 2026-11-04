@@ -1,0 +1,9 @@
+---
+# ansible-lint configuration: "production" is the strictest built-in profile.
+profile: production
+exclude_paths:
+  - collections/
+  - .cache/
+  - inventories/*/group_vars/all/vault.yml
+# Secrets are referenced from vault.yml, which is not part of the repository.
+mock_roles: []

@@ -1,0 +1,24 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+[Unit]
+Description=PostgreSQL for Artifact Keeper
+
+[Container]
+ContainerName=ak-postgres
+Image={{ ak_standalone_postgres_image }}
+Pull=never
+Network=artifact-keeper.network
+EnvironmentFile={{ ak_standalone_config_dir }}/postgres.env
+# PostgreSQL 18 images keep the cluster below /var/lib/postgresql/<major>/.
+Volume=ak-postgres-data:/var/lib/postgresql
+# Exec form: works independently of the shell in the image.
+HealthCmd=["pg_isready","-U","{{ ak_standalone_db_user }}","-d","{{ ak_standalone_db_name }}"]
+HealthInterval=10s
+HealthRetries=10
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

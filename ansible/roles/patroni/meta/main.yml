@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  author: Artifact Keeper lab
+  description: PostgreSQL high availability with Patroni (PGDG packages, etcd DCS)
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: EL
+      versions:
+        - "10"
+dependencies: []

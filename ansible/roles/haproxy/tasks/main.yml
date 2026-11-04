@@ -1,0 +1,56 @@
+---
+- name: Install HAProxy
+  become: true
+  ansible.builtin.dnf:
+    name: "{{ haproxy_packages }}"
+    state: present
+
+# HAProxy forwards to non-standard ports (5432, 3900, 9200 ...); SELinux blocks that by default.
+- name: Allow HAProxy to connect to any port (SELinux)
+  become: true
+  ansible.posix.seboolean:
+    name: haproxy_connect_any
+    state: true
+    persistent: true
+
+- name: Open HAProxy ports in the cluster zone
+  become: true
+  ansible.posix.firewalld:
+    zone: "{{ haproxy_firewall_zone }}"
+    port: "{{ item }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - "{{ haproxy_http_port }}"
+    - "{{ haproxy_postgres_port }}"
+    - "{{ haproxy_s3_port }}"
+    - "{{ haproxy_opensearch_port }}"
+    - "{{ haproxy_stats_port }}"
+
+- name: Open HTTP port for clients
+  become: true
+  ansible.posix.firewalld:
+    zone: "{{ haproxy_public_zone }}"
+    port: "{{ haproxy_http_port }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+
+- name: Write HAProxy configuration
+  become: true
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    owner: root
+    group: root
+    mode: "0644"
+    validate: haproxy -c -q -f %s
+  notify: Reload haproxy
+
+- name: Start HAProxy
+  become: true
+  ansible.builtin.systemd_service:
+    name: haproxy
+    state: started
+    enabled: true

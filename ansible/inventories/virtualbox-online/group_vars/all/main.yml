@@ -1,0 +1,17 @@
+---
+# Environment settings: VirtualBox lab with internet access.
+# Only values that differ between environments live here; everything else is a role default.
+
+# Install from public repositories and registries.
+ak_offline: false
+
+# Cluster network (VirtualBox host-only adapter). All cluster traffic is restricted to it.
+ak_cluster_network: 192.168.56.0/24
+# IP every service binds to and advertises. The interface is detected from this address.
+ak_cluster_ip: "{{ ansible_host }}"
+# Floating IP held by keepalived. Must be unused (VirtualBox DHCP server sits on .100).
+ak_vip: 192.168.56.60
+ak_domain: lab.local
+ak_external_url: "http://{{ ak_vip }}"
+# Dedicated firewalld zone for cluster-internal ports.
+ak_firewall_zone: ak-cluster

@@ -1,0 +1,36 @@
+---
+# Operating system baseline for a single host running Artifact Keeper (and optionally
+# Artifactory OSS) in rootless Podman. Designed for a plain minimal installation.
+standalone_host_packages:
+  - acl
+  - chrony
+  - curl
+  - firewalld
+  - jq
+  - policycoreutils-python-utils
+  - python3-libselinux
+  - python3-libsemanage
+  - tar
+
+# Pre-flight limits. Values below these make the stack fail in ways that are hard to
+# diagnose later (OOM kills of OpenSearch/Java, half-pulled images), so the play stops early.
+# Artifact Keeper alone runs in ~2.5 GB; Artifactory adds ~3.5 GB (Java heap + Tomcat).
+standalone_host_min_memory_mb: "{{ 7000 if standalone_artifactory_enabled | default(true) else 3500 }}"
+standalone_host_min_cpus: 2
+# Free space below the service account's home (images + data): AK backend image alone 3.7 GB.
+standalone_host_min_free_gb: "{{ 25 if standalone_artifactory_enabled | default(true) else 15 }}"
+standalone_host_data_path: /home
+
+# Registries that must be reachable for an online installation.
+standalone_host_registry_urls:
+  - https://ghcr.io/v2/
+  - https://registry-1.docker.io/v2/
+  - https://releases-docker.jfrog.io/v2/
+
+standalone_host_sysctl:
+  # OpenSearch bootstrap check.
+  vm.max_map_count: 262144
+
+# Ports opened in firewalld for clients (the NAT port forwarding points to these).
+standalone_host_firewall_zone: public
+standalone_host_firewall_ports: "{{ [30080] + ([8082] if standalone_artifactory_enabled | default(true) else []) }}"

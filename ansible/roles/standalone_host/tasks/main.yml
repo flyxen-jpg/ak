@@ -1,0 +1,44 @@
+---
+- name: Import pre-flight checks
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Install base packages
+  become: true
+  ansible.builtin.dnf:
+    name: "{{ standalone_host_packages }}"
+    state: present
+
+- name: Apply kernel parameters
+  become: true
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/90-artifact-keeper.conf
+    state: present
+  loop: "{{ standalone_host_sysctl | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"
+
+- name: Enable time synchronisation
+  become: true
+  ansible.builtin.systemd_service:
+    name: chronyd
+    state: started
+    enabled: true
+
+- name: Enable firewalld
+  become: true
+  ansible.builtin.systemd_service:
+    name: firewalld
+    state: started
+    enabled: true
+
+- name: Open client ports
+  become: true
+  ansible.posix.firewalld:
+    zone: "{{ standalone_host_firewall_zone }}"
+    port: "{{ item }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ standalone_host_firewall_ports }}"

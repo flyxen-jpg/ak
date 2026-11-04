@@ -1,0 +1,22 @@
+---
+# Complete deployment of the Artifact Keeper HA cluster.
+#   ansible-playbook -i inventories/<env>/hosts.yml playbooks/site.yml
+# Every step is a playbook of its own and can be run separately; the order follows the
+# dependencies (DCS -> storage/search -> database -> load balancer -> application).
+- name: Prepare operating system
+  ansible.builtin.import_playbook: prepare.yml
+
+- name: Deploy etcd, Garage and OpenSearch
+  ansible.builtin.import_playbook: infrastructure.yml
+
+- name: Deploy PostgreSQL with Patroni
+  ansible.builtin.import_playbook: database.yml
+
+- name: Deploy HAProxy and keepalived
+  ansible.builtin.import_playbook: loadbalancer.yml
+
+- name: Deploy Artifact Keeper
+  ansible.builtin.import_playbook: artifact_keeper.yml
+
+- name: Verify the cluster end to end
+  ansible.builtin.import_playbook: verify.yml

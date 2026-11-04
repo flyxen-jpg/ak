@@ -1,0 +1,90 @@
+---
+- name: Open OpenSearch ports in the cluster zone
+  become: true
+  ansible.posix.firewalld:
+    zone: "{{ opensearch_firewall_zone }}"
+    port: "{{ item }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - "{{ opensearch_http_port }}"
+    - "{{ opensearch_transport_port }}"
+
+# Required by the OpenSearch bootstrap checks; also set by the base role, repeated here so
+# the role works on its own.
+- name: Raise vm.max_map_count for OpenSearch
+  become: true
+  ansible.posix.sysctl:
+    name: vm.max_map_count
+    value: "262144"
+    sysctl_file: /etc/sysctl.d/90-artifact-keeper.conf
+    state: present
+
+- name: Provide OpenSearch image
+  ansible.builtin.include_role:
+    name: podman
+    tasks_from: image.yml
+  vars:
+    podman_image: "{{ opensearch_image }}"
+
+- name: Install OpenSearch Quadlet unit
+  become: true
+  ansible.builtin.template:
+    src: opensearch.container.j2
+    dest: "{{ podman_quadlet_dir }}/opensearch.container"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart opensearch
+
+- name: Apply pending OpenSearch restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Start OpenSearch
+  become: true
+  become_user: "{{ podman_user }}"
+  ansible.builtin.systemd_service:
+    name: opensearch.service
+    scope: user
+    state: started
+    daemon_reload: true
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ podman_user_uid }}"
+
+- name: Wait until all OpenSearch nodes have joined
+  ansible.builtin.uri:
+    url: "http://{{ opensearch_listen_ip }}:{{ opensearch_http_port }}/_cluster/health"
+  register: opensearch_health
+  until:
+    - opensearch_health.json is defined
+    - opensearch_health.json.number_of_nodes == groups[opensearch_group] | length
+    - opensearch_health.json.status in ['green', 'yellow']
+  retries: 40
+  delay: 5
+  run_once: true
+
+- name: Read index template for Artifact Keeper indices
+  ansible.builtin.uri:
+    url: "http://{{ opensearch_listen_ip }}:{{ opensearch_http_port }}/_index_template/artifact-keeper-replicas"
+    status_code: [200, 404]
+  register: opensearch_template
+  run_once: true
+
+- name: Create index template with replicas for Artifact Keeper indices
+  ansible.builtin.uri:
+    url: "http://{{ opensearch_listen_ip }}:{{ opensearch_http_port }}/_index_template/artifact-keeper-replicas"
+    method: PUT
+    body_format: json
+    body:
+      index_patterns: "{{ opensearch_ak_index_patterns }}"
+      priority: 100
+      template:
+        settings:
+          index.number_of_replicas: "{{ opensearch_ak_index_replicas }}"
+  run_once: true
+  when: >-
+    opensearch_template.status == 404 or
+    (opensearch_template.json.index_templates[0].index_template.template.settings.index.number_of_replicas | int)
+    != (opensearch_ak_index_replicas | int)
+  changed_when: true

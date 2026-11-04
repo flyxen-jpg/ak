@@ -1,0 +1,115 @@
+---
+- name: Verify that all secrets are defined
+  ansible.builtin.assert:
+    that:
+      - ak_standalone_db_password | length >= 12
+      - ak_standalone_admin_password | length >= 12
+      - ak_standalone_jwt_secret | length >= 32
+      # Base64 of exactly 32 bytes is always 43 characters plus one "=".
+      - ak_standalone_webhook_secret_key is match('^[A-Za-z0-9+/]{43}=$')
+      - ak_standalone_migration_encryption_key is match('^[A-Za-z0-9+/]{43}=$')
+      - ak_standalone_sso_encryption_key is match('^[A-Za-z0-9+/]{43}=$')
+    fail_msg: >-
+      Secrets missing or malformed. The three *_key values must be Base64 of exactly 32 bytes
+      (openssl rand -base64 32), otherwise the backend refuses to start.
+    quiet: true
+  no_log: true
+
+- name: Provide container images
+  ansible.builtin.include_role:
+    name: podman
+    tasks_from: image.yml
+  vars:
+    podman_image: "{{ item }}"
+  loop:
+    - "{{ ak_standalone_postgres_image }}"
+    - "{{ ak_standalone_opensearch_image }}"
+    - "{{ ak_standalone_backend_image }}"
+    - "{{ ak_standalone_web_image }}"
+    - "{{ ak_standalone_caddy_image }}"
+
+- name: Create configuration directory
+  become: true
+  ansible.builtin.file:
+    path: "{{ ak_standalone_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ podman_user }}"
+    mode: "0750"
+
+# Environment files are read by Podman (as the service account) when a container starts.
+- name: Write environment files
+  become: true
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ ak_standalone_config_dir }}/{{ item }}"
+    owner: root
+    group: "{{ podman_user }}"
+    mode: "0640"
+  loop:
+    - postgres.env
+    - backend.env
+  notify: Restart artifact keeper stack
+
+# Mounted into the Caddy container; container_file_t allows access under SELinux without
+# relabelling (rootless Podman cannot relabel root-owned files).
+- name: Write Caddy configuration
+  become: true
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ ak_standalone_config_dir }}/Caddyfile"
+    owner: root
+    group: "{{ podman_user }}"
+    mode: "0640"
+    setype: container_file_t
+  notify: Restart artifact keeper stack
+
+- name: Install Quadlet units
+  become: true
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ podman_quadlet_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - artifact-keeper.network
+    - ak-postgres.container
+    - ak-opensearch.container
+    - ak-backend.container
+    - ak-web.container
+    - ak-caddy.container
+  notify: Restart artifact keeper stack
+
+- name: Apply pending restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Start Artifact Keeper
+  become: true
+  become_user: "{{ podman_user }}"
+  ansible.builtin.systemd_service:
+    name: "{{ item }}.service"
+    scope: user
+    state: started
+    daemon_reload: true
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ podman_user_uid }}"
+  loop: "{{ ak_standalone_units }}"
+
+# The first start runs the database migrations and builds the search index.
+- name: Wait until Artifact Keeper is ready
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ ak_standalone_http_port }}/readyz"
+  register: ak_standalone_ready
+  until: ak_standalone_ready.status == 200
+  retries: 60
+  delay: 5
+
+- name: Wait until the web interface answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ ak_standalone_http_port }}/"
+    status_code: [200, 307, 308]
+  register: ak_standalone_web
+  until: ak_standalone_web.status in [200, 307, 308]
+  retries: 30
+  delay: 5

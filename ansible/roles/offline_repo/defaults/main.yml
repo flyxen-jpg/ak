@@ -1,0 +1,11 @@
+---
+# Extracted offline bundle on the control node.
+offline_repo_bundle_dir: "{{ ak_bundle_dir }}"
+# Parent directory for the local RPM repository on each managed node.
+# Every bundle is unpacked into its own sub-directory named after its BUNDLE_ID.
+offline_repo_base_dir: /opt/ak-offline
+# Name of the dnf repository created by this role.
+offline_repo_name: ak-offline
+# Disable all other repositories: without network access dnf would otherwise run into
+# timeouts on every call. The change is reversible (enabled=0 -> enabled=1).
+offline_repo_disable_others: true

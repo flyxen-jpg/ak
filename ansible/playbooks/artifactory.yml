@@ -1,0 +1,9 @@
+---
+# Artifactory OSS on the hosts of group "artifactory" (migration source in a cluster setup).
+#   ansible-playbook -i inventories/<env>/hosts.yml playbooks/artifactory.yml
+- name: Install Artifactory OSS
+  hosts: artifactory
+  gather_facts: true
+  roles:
+    - role: artifactory_oss
+      tags: [artifactory]

@@ -1,0 +1,7 @@
+---
+# Reload instead of restart: open connections (running uploads) are finished by the old process.
+- name: Reload haproxy
+  become: true
+  ansible.builtin.systemd_service:
+    name: haproxy
+    state: reloaded

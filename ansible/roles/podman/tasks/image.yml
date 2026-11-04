@@ -1,0 +1,74 @@
+---
+# Ensures one container image is present in the service account's image store.
+# Called by component roles:
+#   ansible.builtin.include_role: { name: podman, tasks_from: image.yml }
+#   vars: { podman_image: "quay.io/coreos/etcd:v3.6.16" }
+# Online the image is pulled; offline it is copied from the bundle and loaded.
+# Quadlet units use Pull=never, so a missing image fails fast instead of hanging on a registry.
+
+- name: Derive archive name of image {{ podman_image }}
+  ansible.builtin.set_fact:
+    podman_image_archive: "{{ podman_image | regex_replace('[/:@]', '_') }}.tar"
+
+- name: Check presence of image {{ podman_image }}
+  become: true
+  become_user: "{{ podman_user }}"
+  ansible.builtin.command: podman image exists {{ podman_image }}
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ podman_user_uid }}"
+  register: podman_image_exists
+  changed_when: false
+  failed_when: podman_image_exists.rc not in [0, 1]
+
+- name: Pull {{ podman_image }}
+  become: true
+  become_user: "{{ podman_user }}"
+  ansible.builtin.command: podman pull --quiet {{ podman_image }}
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ podman_user_uid }}"
+  register: podman_image_pull
+  changed_when: true
+  retries: 3
+  delay: 10
+  until: podman_image_pull is succeeded
+  when:
+    - podman_image_exists.rc == 1
+    - not ak_offline
+
+- name: Load offline bundle image {{ podman_image }}
+  when:
+    - podman_image_exists.rc == 1
+    - ak_offline
+  block:
+    - name: Create image staging directory
+      become: true
+      ansible.builtin.file:
+        path: "{{ podman_image_staging_dir }}"
+        state: directory
+        owner: root
+        group: "{{ podman_user }}"
+        mode: "0750"
+
+    - name: Copy image archive {{ podman_image_archive }}
+      become: true
+      ansible.builtin.copy:
+        src: "{{ ak_bundle_dir }}/images/{{ podman_image_archive }}"
+        dest: "{{ podman_image_staging_dir }}/{{ podman_image_archive }}"
+        owner: root
+        group: "{{ podman_user }}"
+        mode: "0640"
+
+    - name: Load image archive {{ podman_image_archive }}
+      become: true
+      become_user: "{{ podman_user }}"
+      ansible.builtin.command: podman load --quiet --input {{ podman_image_staging_dir }}/{{ podman_image_archive }}
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ podman_user_uid }}"
+      changed_when: true
+
+  always:
+    - name: Remove image archive {{ podman_image_archive }}
+      become: true
+      ansible.builtin.file:
+        path: "{{ podman_image_staging_dir }}/{{ podman_image_archive }}"
+        state: absent

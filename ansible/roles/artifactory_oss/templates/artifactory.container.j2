@@ -1,0 +1,34 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+[Unit]
+Description=JFrog Artifactory {{ artifactory_oss_edition }} {{ artifactory_oss_version }}
+Wants=artifactory-postgres.service
+After=artifactory-postgres.service
+
+[Container]
+ContainerName=artifactory
+Image={{ artifactory_oss_image }}
+Pull=never
+Network=artifactory.network
+# Fixed address: a migration client can allow exactly this IP.
+IP={{ artifactory_oss_ip }}
+EnvironmentFile={{ artifactory_oss_config_dir }}/artifactory.env
+PublishPort={{ artifactory_oss_http_port }}:{{ artifactory_oss_http_port }}
+# Named volume: Podman copies content and owner (uid 1030) from the image on first use,
+# so no chown on the host is needed (the original bundle requires config.sh for that).
+Volume=artifactory-data:/var/opt/jfrog/artifactory
+Ulimit=nofile=32000:40000
+HealthCmd=["curl","-fsS","-m","8","http://localhost:{{ artifactory_oss_http_port }}/router/api/v1/system/health"]
+HealthInterval=30s
+HealthTimeout=10s
+HealthStartPeriod=300s
+HealthRetries=10
+
+[Service]
+# The JVM does not stop within the default 10 s; give it time to shut down cleanly.
+TimeoutStopSec=120
+Restart=always
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target

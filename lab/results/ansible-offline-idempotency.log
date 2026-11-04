@@ -1,0 +1,967 @@
+
+PLAY [Prepare operating system of all cluster nodes] ***************************
+
+TASK [offline_repo : Read bundle identifier on the control node] ***************
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [offline_repo : Create repository directory for this bundle] **************
+[0;33mchanged: [ans-node1][0m
+[0;33mchanged: [ans-node2][0m
+[0;33mchanged: [ans-node3][0m
+
+TASK [offline_repo : Unpack RPM repository from the bundle] ********************
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+[0;36mskipping: [ans-node1][0m
+
+TASK [offline_repo : Install vendor GPG keys shipped with the bundle] **********
+[0;32mok: [ans-node3] => (item=RPM-GPG-KEY-Rocky-10)[0m
+[0;32mok: [ans-node1] => (item=RPM-GPG-KEY-Rocky-10)[0m
+[0;32mok: [ans-node2] => (item=RPM-GPG-KEY-Rocky-10)[0m
+[0;32mok: [ans-node3] => (item=RPM-GPG-KEY-EPEL-10)[0m
+[0;32mok: [ans-node1] => (item=RPM-GPG-KEY-EPEL-10)[0m
+[0;32mok: [ans-node2] => (item=RPM-GPG-KEY-EPEL-10)[0m
+[0;32mok: [ans-node3] => (item=PGDG-RPM-GPG-KEY-RHEL)[0m
+[0;32mok: [ans-node2] => (item=PGDG-RPM-GPG-KEY-RHEL)[0m
+[0;32mok: [ans-node1] => (item=PGDG-RPM-GPG-KEY-RHEL)[0m
+
+TASK [offline_repo : Configure local repository (signatures of Rocky, EPEL and PGDG are verified)] ***
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node1][0m
+
+TASK [offline_repo : Find other repository definitions] ************************
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node1][0m
+
+TASK [offline_repo : Disable online repositories] ******************************
+[0;32mok: [ans-node3] => (item=/etc/yum.repos.d/rocky-addons.repo)[0m
+[0;32mok: [ans-node2] => (item=/etc/yum.repos.d/rocky-addons.repo)[0m
+[0;32mok: [ans-node1] => (item=/etc/yum.repos.d/rocky-addons.repo)[0m
+[0;32mok: [ans-node1] => (item=/etc/yum.repos.d/rocky-devel.repo)[0m
+[0;32mok: [ans-node3] => (item=/etc/yum.repos.d/rocky-devel.repo)[0m
+[0;32mok: [ans-node2] => (item=/etc/yum.repos.d/rocky-devel.repo)[0m
+[0;32mok: [ans-node1] => (item=/etc/yum.repos.d/rocky-extras.repo)[0m
+[0;32mok: [ans-node3] => (item=/etc/yum.repos.d/rocky-extras.repo)[0m
+[0;32mok: [ans-node2] => (item=/etc/yum.repos.d/rocky-extras.repo)[0m
+[0;32mok: [ans-node3] => (item=/etc/yum.repos.d/rocky-security.repo)[0m
+[0;32mok: [ans-node1] => (item=/etc/yum.repos.d/rocky-security.repo)[0m
+[0;32mok: [ans-node2] => (item=/etc/yum.repos.d/rocky-security.repo)[0m
+[0;32mok: [ans-node3] => (item=/etc/yum.repos.d/rocky.repo)[0m
+[0;32mok: [ans-node1] => (item=/etc/yum.repos.d/rocky.repo)[0m
+[0;32mok: [ans-node2] => (item=/etc/yum.repos.d/rocky.repo)[0m
+
+TASK [offline_repo : Stop periodic metadata refresh (would only produce network errors)] ***
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node1][0m
+
+TASK [offline_repo : Find unpacked bundles] ************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node2][0m
+
+TASK [offline_repo : Delete outdated bundle directories] ***********************
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [base : Verify that the target runs a supported operating system] *********
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [base : Detect the network interface that carries the cluster IP] *********
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [base : Verify that the cluster IP is configured on this host] ************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [base : Install base packages] ********************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [base : Apply kernel parameters] ******************************************
+[0;32mok: [ans-node2] => (item=vm.max_map_count=262144)[0m
+[0;32mok: [ans-node1] => (item=vm.max_map_count=262144)[0m
+[0;32mok: [ans-node1] => (item=vm.swappiness=10)[0m
+[0;32mok: [ans-node3] => (item=vm.max_map_count=262144)[0m
+[0;32mok: [ans-node2] => (item=vm.swappiness=10)[0m
+[0;32mok: [ans-node3] => (item=vm.swappiness=10)[0m
+
+TASK [base : Configure time servers] *******************************************
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [base : Enable time synchronisation] **************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [base : Add cluster nodes to /etc/hosts] **********************************
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [base : Enable firewalld] *************************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node2][0m
+
+TASK [base : Create cluster firewall zone] *************************************
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [base : Activate a newly created zone] ************************************
+
+TASK [base : Activate a newly created zone] ************************************
+
+TASK [base : Activate a newly created zone] ************************************
+
+TASK [base : Allow essential services in the cluster zone] *********************
+[0;32mok: [ans-node1] => (item=ssh)[0m
+[0;32mok: [ans-node2] => (item=ssh)[0m
+[0;32mok: [ans-node3] => (item=ssh)[0m
+
+TASK [base : Bind cluster network to the cluster zone] *************************
+[0;32mok: [ans-node1] => (item=192.168.56.0/24)[0m
+[0;32mok: [ans-node3] => (item=192.168.56.0/24)[0m
+[0;32mok: [ans-node2] => (item=192.168.56.0/24)[0m
+
+TASK [base : Install cluster status script] ************************************
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node1][0m
+
+PLAY [Deploy etcd, Garage and OpenSearch] **************************************
+
+TASK [podman : Install Podman] *************************************************
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node1][0m
+
+TASK [podman : Create container service account] *******************************
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node3][0m
+
+TASK [podman : Create Ansible temp directory for the service account] **********
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [podman : Read UID of the service account] ********************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [podman : Remember UID for Quadlet paths and the user systemd instance] ***
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [podman : Check subordinate ID ranges of the service account] *************
+[0;32mok: [ans-node3] => (item=/etc/subuid)[0m
+[0;32mok: [ans-node2] => (item=/etc/subuid)[0m
+[0;32mok: [ans-node1] => (item=/etc/subuid)[0m
+[0;32mok: [ans-node3] => (item=/etc/subgid)[0m
+[0;32mok: [ans-node2] => (item=/etc/subgid)[0m
+[0;32mok: [ans-node1] => (item=/etc/subgid)[0m
+
+TASK [podman : Enable lingering for the service account] ***********************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [podman : Start the user systemd instance] ********************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Create Quadlet directory] ***************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [etcd : Open etcd ports in the cluster zone] ******************************
+[0;32mok: [ans-node1] => (item=2379)[0m
+[0;32mok: [ans-node2] => (item=2379)[0m
+[0;32mok: [ans-node3] => (item=2379)[0m
+[0;32mok: [ans-node1] => (item=2380)[0m
+[0;32mok: [ans-node3] => (item=2380)[0m
+[0;32mok: [ans-node2] => (item=2380)[0m
+
+TASK [Provide etcd image] ******************************************************
+
+TASK [podman : Derive archive name of image quay.io/coreos/etcd:v3.6.16] *******
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [podman : Check presence of image quay.io/coreos/etcd:v3.6.16] ************
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node1][0m
+
+TASK [podman : Pull quay.io/coreos/etcd:v3.6.16] *******************************
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [podman : Create image staging directory] *********************************
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [podman : Copy image archive quay.io_coreos_etcd_v3.6.16.tar] *************
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [podman : Load image archive quay.io_coreos_etcd_v3.6.16.tar] *************
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [podman : Remove image archive quay.io_coreos_etcd_v3.6.16.tar] ***********
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [etcd : Install etcd Quadlet unit] ****************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node2][0m
+
+TASK [etcd : Apply pending etcd restarts] **************************************
+
+TASK [etcd : Apply pending etcd restarts] **************************************
+
+TASK [etcd : Apply pending etcd restarts] **************************************
+
+TASK [etcd : Start etcd] *******************************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node2][0m
+
+TASK [etcd : Wait until the etcd member is healthy] ****************************
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node1][0m
+
+TASK [garage : Verify that the Garage secrets are defined] *********************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [garage : Open Garage ports in the cluster zone] **************************
+[0;32mok: [ans-node3] => (item=3900)[0m
+[0;32mok: [ans-node2] => (item=3900)[0m
+[0;32mok: [ans-node1] => (item=3900)[0m
+[0;32mok: [ans-node3] => (item=3901)[0m
+[0;32mok: [ans-node2] => (item=3901)[0m
+[0;32mok: [ans-node1] => (item=3901)[0m
+[0;32mok: [ans-node3] => (item=3903)[0m
+[0;32mok: [ans-node2] => (item=3903)[0m
+[0;32mok: [ans-node1] => (item=3903)[0m
+
+TASK [Provide Garage image] ****************************************************
+
+TASK [podman : Derive archive name of image docker.io/dxflrs/garage:v2.5.0] ****
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [podman : Check presence of image docker.io/dxflrs/garage:v2.5.0] *********
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Pull docker.io/dxflrs/garage:v2.5.0] ****************************
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [podman : Create image staging directory] *********************************
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [podman : Copy image archive docker.io_dxflrs_garage_v2.5.0.tar] **********
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [podman : Load image archive docker.io_dxflrs_garage_v2.5.0.tar] **********
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [podman : Remove image archive docker.io_dxflrs_garage_v2.5.0.tar] ********
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [garage : Create Garage configuration directory] **************************
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node1][0m
+
+TASK [garage : Write Garage configuration] *************************************
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [garage : Install Garage Quadlet unit] ************************************
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node1][0m
+
+TASK [garage : Apply pending Garage restarts] **********************************
+
+TASK [garage : Apply pending Garage restarts] **********************************
+
+TASK [garage : Apply pending Garage restarts] **********************************
+
+TASK [garage : Start Garage] ***************************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node2][0m
+
+TASK [garage : Wait for the Garage admin API] **********************************
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [garage : Read Garage node ID] ********************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [garage : Publish layout values of this node] *****************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [garage : Read current Garage cluster status] *****************************
+[0;32mok: [ans-node1][0m
+
+TASK [garage : Connect missing Garage peers] ***********************************
+[0;36mskipping: [ans-node1] => (item=ans-node1) [0m
+[0;36mskipping: [ans-node1] => (item=ans-node2) [0m
+[0;36mskipping: [ans-node1] => (item=ans-node3) [0m
+[0;36mskipping: [ans-node1][0m
+
+TASK [garage : Read current Garage layout] *************************************
+[0;32mok: [ans-node1][0m
+
+TASK [garage : Assign zone and capacity to every node] *************************
+[0;36mskipping: [ans-node1] => (item=ans-node1) [0m
+[0;36mskipping: [ans-node1] => (item=ans-node2) [0m
+[0;36mskipping: [ans-node1] => (item=ans-node3) [0m
+[0;36mskipping: [ans-node1][0m
+
+TASK [garage : Apply initial layout] *******************************************
+[0;36mskipping: [ans-node1][0m
+
+TASK [garage : Check whether the access key exists] ****************************
+[0;32mok: [ans-node1][0m
+
+TASK [garage : Import access key for Artifact Keeper] **************************
+[0;36mskipping: [ans-node1][0m
+
+TASK [garage : Check whether the bucket exists] ********************************
+[0;32mok: [ans-node1][0m
+
+TASK [garage : Create bucket] **************************************************
+[0;36mskipping: [ans-node1][0m
+
+TASK [garage : Grant the access key full rights on the bucket] *****************
+[0;36mskipping: [ans-node1][0m
+
+TASK [opensearch : Open OpenSearch ports in the cluster zone] ******************
+[0;32mok: [ans-node1] => (item=9200)[0m
+[0;32mok: [ans-node2] => (item=9200)[0m
+[0;32mok: [ans-node3] => (item=9200)[0m
+[0;32mok: [ans-node1] => (item=9300)[0m
+[0;32mok: [ans-node2] => (item=9300)[0m
+[0;32mok: [ans-node3] => (item=9300)[0m
+
+TASK [opensearch : Raise vm.max_map_count for OpenSearch] **********************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [Provide OpenSearch image] ************************************************
+
+TASK [podman : Derive archive name of image docker.io/opensearchproject/opensearch:2.19.6] ***
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node3][0m
+
+TASK [podman : Check presence of image docker.io/opensearchproject/opensearch:2.19.6] ***
+[0;32mok: [ans-node3][0m
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node1][0m
+
+TASK [podman : Pull docker.io/opensearchproject/opensearch:2.19.6] *************
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [podman : Create image staging directory] *********************************
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [podman : Copy image archive docker.io_opensearchproject_opensearch_2.19.6.tar] ***
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [podman : Load image archive docker.io_opensearchproject_opensearch_2.19.6.tar] ***
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [podman : Remove image archive docker.io_opensearchproject_opensearch_2.19.6.tar] ***
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+[0;36mskipping: [ans-node3][0m
+
+TASK [opensearch : Install OpenSearch Quadlet unit] ****************************
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node3][0m
+
+TASK [opensearch : Apply pending OpenSearch restarts] **************************
+
+TASK [opensearch : Apply pending OpenSearch restarts] **************************
+
+TASK [opensearch : Apply pending OpenSearch restarts] **************************
+
+TASK [opensearch : Start OpenSearch] *******************************************
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node3][0m
+
+TASK [opensearch : Wait until all OpenSearch nodes have joined] ****************
+[0;32mok: [ans-node1][0m
+
+TASK [opensearch : Read index template for Artifact Keeper indices] ************
+[0;32mok: [ans-node1][0m
+
+TASK [opensearch : Create index template with replicas for Artifact Keeper indices] ***
+[0;36mskipping: [ans-node1][0m
+
+PLAY [Deploy PostgreSQL with Patroni] ******************************************
+
+TASK [patroni : Install EPEL repository] ***************************************
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+
+TASK [patroni : Import PGDG signing key] ***************************************
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+
+TASK [patroni : Install PGDG repository] ***************************************
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+
+TASK [patroni : Install PostgreSQL and Patroni] ********************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [patroni : Open PostgreSQL and Patroni ports in the cluster zone] *********
+[0;32mok: [ans-node2] => (item=5432)[0m
+[0;32mok: [ans-node1] => (item=5432)[0m
+[0;32mok: [ans-node2] => (item=8008)[0m
+[0;32mok: [ans-node1] => (item=8008)[0m
+
+TASK [patroni : Create TLS directory] ******************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [patroni : Create self-signed server certificate] *************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [patroni : Hand certificate and key to the postgres user] *****************
+[0;32mok: [ans-node1] => (item={'name': 'server.crt', 'mode': '0644'})[0m
+[0;32mok: [ans-node2] => (item={'name': 'server.crt', 'mode': '0644'})[0m
+[0;32mok: [ans-node1] => (item={'name': 'server.key', 'mode': '0600'})[0m
+[0;32mok: [ans-node2] => (item={'name': 'server.key', 'mode': '0600'})[0m
+
+TASK [patroni : Create Patroni configuration directory] ************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [patroni : Install post-bootstrap script (creates application role and database)] ***
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node1][0m
+
+TASK [patroni : Write Patroni configuration] ***********************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [patroni : Start Patroni on the first node] *******************************
+[0;36mskipping: [ans-node2][0m
+[0;32mok: [ans-node1][0m
+
+TASK [patroni : Wait for a Patroni leader] *************************************
+[0;32mok: [ans-node1][0m
+
+TASK [patroni : Start Patroni on the remaining nodes] **************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [patroni : Wait until all replicas are streaming] *************************
+[0;32mok: [ans-node1][0m
+
+PLAY [Deploy HAProxy and keepalived] *******************************************
+
+TASK [Detect cluster interface] ************************************************
+
+TASK [base : Detect the network interface that carries the cluster IP] *********
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [base : Verify that the cluster IP is configured on this host] ************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [haproxy : Install HAProxy] ***********************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [haproxy : Allow HAProxy to connect to any port (SELinux)] ****************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [haproxy : Open HAProxy ports in the cluster zone] ************************
+[0;32mok: [ans-node1] => (item=80)[0m
+[0;32mok: [ans-node2] => (item=80)[0m
+[0;32mok: [ans-node1] => (item=5000)[0m
+[0;32mok: [ans-node2] => (item=5000)[0m
+[0;32mok: [ans-node1] => (item=3910)[0m
+[0;32mok: [ans-node2] => (item=3910)[0m
+[0;32mok: [ans-node1] => (item=9201)[0m
+[0;32mok: [ans-node2] => (item=9201)[0m
+[0;32mok: [ans-node1] => (item=8404)[0m
+[0;32mok: [ans-node2] => (item=8404)[0m
+
+TASK [haproxy : Open HTTP port for clients] ************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [haproxy : Write HAProxy configuration] ***********************************
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node1][0m
+
+TASK [haproxy : Start HAProxy] *************************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [keepalived : Verify keepalived settings] *********************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [keepalived : Install keepalived] *****************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [keepalived : Allow VRRP between the cluster nodes] ***********************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [keepalived : Check whether this node already holds the VIP] **************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [keepalived : Check that no foreign host answers for the VIP] *************
+[0;36mskipping: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [keepalived : Collect MAC addresses of the peer nodes] ********************
+[0;36mskipping: [ans-node1] => (item=ans-node2) [0m
+[0;36mskipping: [ans-node1][0m
+[0;32mok: [ans-node2] => (item=ans-node1)[0m
+
+TASK [keepalived : Abort on VIP conflict] **************************************
+[0;36mskipping: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [keepalived : Write keepalived configuration] *****************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [keepalived : Start keepalived] *******************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+PLAY [Provide Artifact Keeper images] ******************************************
+
+TASK [Pull or load backend and web images] *************************************
+
+TASK [podman : Install Podman] *************************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Create container service account] *******************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Create Ansible temp directory for the service account] **********
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Read UID of the service account] ********************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Remember UID for Quadlet paths and the user systemd instance] ***
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Check subordinate ID ranges of the service account] *************
+[0;32mok: [ans-node1] => (item=/etc/subuid)[0m
+[0;32mok: [ans-node2] => (item=/etc/subuid)[0m
+[0;32mok: [ans-node1] => (item=/etc/subgid)[0m
+[0;32mok: [ans-node2] => (item=/etc/subgid)[0m
+
+TASK [podman : Enable lingering for the service account] ***********************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Start the user systemd instance] ********************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Create Quadlet directory] ***************************************
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [Provide Artifact Keeper images] ******************************************
+
+TASK [podman : Derive archive name of image ghcr.io/artifact-keeper/artifact-keeper-backend:1.11.11] ***
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Check presence of image ghcr.io/artifact-keeper/artifact-keeper-backend:1.11.11] ***
+[0;32mok: [ans-node2][0m
+[0;32mok: [ans-node1][0m
+
+TASK [podman : Pull ghcr.io/artifact-keeper/artifact-keeper-backend:1.11.11] ***
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Create image staging directory] *********************************
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Copy image archive ghcr.io_artifact-keeper_artifact-keeper-backend_1.11.11.tar] ***
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Load image archive ghcr.io_artifact-keeper_artifact-keeper-backend_1.11.11.tar] ***
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Remove image archive ghcr.io_artifact-keeper_artifact-keeper-backend_1.11.11.tar] ***
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Derive archive name of image ghcr.io/artifact-keeper/artifact-keeper-web:1.11.2] ***
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Check presence of image ghcr.io/artifact-keeper/artifact-keeper-web:1.11.2] ***
+[0;32mok: [ans-node1][0m
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Pull ghcr.io/artifact-keeper/artifact-keeper-web:1.11.2] ********
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Create image staging directory] *********************************
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Copy image archive ghcr.io_artifact-keeper_artifact-keeper-web_1.11.2.tar] ***
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Load image archive ghcr.io_artifact-keeper_artifact-keeper-web_1.11.2.tar] ***
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Remove image archive ghcr.io_artifact-keeper_artifact-keeper-web_1.11.2.tar] ***
+[0;36mskipping: [ans-node1][0m
+[0;36mskipping: [ans-node2][0m
+
+PLAY [Deploy Artifact Keeper] **************************************************
+
+TASK [podman : Install Podman] *************************************************
+[0;32mok: [ans-node1][0m
+
+TASK [podman : Create container service account] *******************************
+[0;32mok: [ans-node1][0m
+
+TASK [podman : Create Ansible temp directory for the service account] **********
+[0;32mok: [ans-node1][0m
+
+TASK [podman : Read UID of the service account] ********************************
+[0;32mok: [ans-node1][0m
+
+TASK [podman : Remember UID for Quadlet paths and the user systemd instance] ***
+[0;32mok: [ans-node1][0m
+
+TASK [podman : Check subordinate ID ranges of the service account] *************
+[0;32mok: [ans-node1] => (item=/etc/subuid)[0m
+[0;32mok: [ans-node1] => (item=/etc/subgid)[0m
+
+TASK [podman : Enable lingering for the service account] ***********************
+[0;32mok: [ans-node1][0m
+
+TASK [podman : Start the user systemd instance] ********************************
+[0;32mok: [ans-node1][0m
+
+TASK [podman : Create Quadlet directory] ***************************************
+[0;32mok: [ans-node1][0m
+
+TASK [artifact_keeper : Verify that all shared secrets are defined] ************
+[0;32mok: [ans-node1][0m
+
+TASK [artifact_keeper : Open Artifact Keeper ports in the cluster zone] ********
+[0;32mok: [ans-node1] => (item=8080)[0m
+[0;32mok: [ans-node1] => (item=3000)[0m
+
+TASK [Provide Artifact Keeper images] ******************************************
+
+TASK [podman : Derive archive name of image ghcr.io/artifact-keeper/artifact-keeper-backend:1.11.11] ***
+[0;32mok: [ans-node1][0m
+
+TASK [podman : Check presence of image ghcr.io/artifact-keeper/artifact-keeper-backend:1.11.11] ***
+[0;32mok: [ans-node1][0m
+
+TASK [podman : Pull ghcr.io/artifact-keeper/artifact-keeper-backend:1.11.11] ***
+[0;36mskipping: [ans-node1][0m
+
+TASK [podman : Create image staging directory] *********************************
+[0;36mskipping: [ans-node1][0m
+
+TASK [podman : Copy image archive ghcr.io_artifact-keeper_artifact-keeper-backend_1.11.11.tar] ***
+[0;36mskipping: [ans-node1][0m
+
+TASK [podman : Load image archive ghcr.io_artifact-keeper_artifact-keeper-backend_1.11.11.tar] ***
+[0;36mskipping: [ans-node1][0m
+
+TASK [podman : Remove image archive ghcr.io_artifact-keeper_artifact-keeper-backend_1.11.11.tar] ***
+[0;36mskipping: [ans-node1][0m
+
+TASK [podman : Derive archive name of image ghcr.io/artifact-keeper/artifact-keeper-web:1.11.2] ***
+[0;32mok: [ans-node1][0m
+
+TASK [podman : Check presence of image ghcr.io/artifact-keeper/artifact-keeper-web:1.11.2] ***
+[0;32mok: [ans-node1][0m
+
+TASK [podman : Pull ghcr.io/artifact-keeper/artifact-keeper-web:1.11.2] ********
+[0;36mskipping: [ans-node1][0m
+
+TASK [podman : Create image staging directory] *********************************
+[0;36mskipping: [ans-node1][0m
+
+TASK [podman : Copy image archive ghcr.io_artifact-keeper_artifact-keeper-web_1.11.2.tar] ***
+[0;36mskipping: [ans-node1][0m
+
+TASK [podman : Load image archive ghcr.io_artifact-keeper_artifact-keeper-web_1.11.2.tar] ***
+[0;36mskipping: [ans-node1][0m
+
+TASK [podman : Remove image archive ghcr.io_artifact-keeper_artifact-keeper-web_1.11.2.tar] ***
+[0;36mskipping: [ans-node1][0m
+
+TASK [artifact_keeper : Create configuration directory] ************************
+[0;32mok: [ans-node1][0m
+
+TASK [artifact_keeper : Write backend environment file] ************************
+[0;32mok: [ans-node1][0m
+
+TASK [artifact_keeper : Install Quadlet units] *********************************
+[0;32mok: [ans-node1] => (item=ak-backend.container)[0m
+[0;32mok: [ans-node1] => (item=ak-web.container)[0m
+
+TASK [artifact_keeper : Apply pending Artifact Keeper restarts] ****************
+
+TASK [artifact_keeper : Start Artifact Keeper] *********************************
+[0;32mok: [ans-node1] => (item=ak-backend.service)[0m
+[0;32mok: [ans-node1] => (item=ak-web.service)[0m
+
+TASK [artifact_keeper : Wait until the backend is ready] ***********************
+[0;32mok: [ans-node1][0m
+
+PLAY [Deploy Artifact Keeper] **************************************************
+
+TASK [podman : Install Podman] *************************************************
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Create container service account] *******************************
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Create Ansible temp directory for the service account] **********
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Read UID of the service account] ********************************
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Remember UID for Quadlet paths and the user systemd instance] ***
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Check subordinate ID ranges of the service account] *************
+[0;32mok: [ans-node2] => (item=/etc/subuid)[0m
+[0;32mok: [ans-node2] => (item=/etc/subgid)[0m
+
+TASK [podman : Enable lingering for the service account] ***********************
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Start the user systemd instance] ********************************
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Create Quadlet directory] ***************************************
+[0;32mok: [ans-node2][0m
+
+TASK [artifact_keeper : Verify that all shared secrets are defined] ************
+[0;32mok: [ans-node2][0m
+
+TASK [artifact_keeper : Open Artifact Keeper ports in the cluster zone] ********
+[0;32mok: [ans-node2] => (item=8080)[0m
+[0;32mok: [ans-node2] => (item=3000)[0m
+
+TASK [Provide Artifact Keeper images] ******************************************
+
+TASK [podman : Derive archive name of image ghcr.io/artifact-keeper/artifact-keeper-backend:1.11.11] ***
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Check presence of image ghcr.io/artifact-keeper/artifact-keeper-backend:1.11.11] ***
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Pull ghcr.io/artifact-keeper/artifact-keeper-backend:1.11.11] ***
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Create image staging directory] *********************************
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Copy image archive ghcr.io_artifact-keeper_artifact-keeper-backend_1.11.11.tar] ***
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Load image archive ghcr.io_artifact-keeper_artifact-keeper-backend_1.11.11.tar] ***
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Remove image archive ghcr.io_artifact-keeper_artifact-keeper-backend_1.11.11.tar] ***
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Derive archive name of image ghcr.io/artifact-keeper/artifact-keeper-web:1.11.2] ***
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Check presence of image ghcr.io/artifact-keeper/artifact-keeper-web:1.11.2] ***
+[0;32mok: [ans-node2][0m
+
+TASK [podman : Pull ghcr.io/artifact-keeper/artifact-keeper-web:1.11.2] ********
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Create image staging directory] *********************************
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Copy image archive ghcr.io_artifact-keeper_artifact-keeper-web_1.11.2.tar] ***
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Load image archive ghcr.io_artifact-keeper_artifact-keeper-web_1.11.2.tar] ***
+[0;36mskipping: [ans-node2][0m
+
+TASK [podman : Remove image archive ghcr.io_artifact-keeper_artifact-keeper-web_1.11.2.tar] ***
+[0;36mskipping: [ans-node2][0m
+
+TASK [artifact_keeper : Create configuration directory] ************************
+[0;32mok: [ans-node2][0m
+
+TASK [artifact_keeper : Write backend environment file] ************************
+[0;32mok: [ans-node2][0m
+
+TASK [artifact_keeper : Install Quadlet units] *********************************
+[0;32mok: [ans-node2] => (item=ak-backend.container)[0m
+[0;32mok: [ans-node2] => (item=ak-web.container)[0m
+
+TASK [artifact_keeper : Apply pending Artifact Keeper restarts] ****************
+
+TASK [artifact_keeper : Start Artifact Keeper] *********************************
+[0;32mok: [ans-node2] => (item=ak-backend.service)[0m
+[0;32mok: [ans-node2] => (item=ak-web.service)[0m
+
+TASK [artifact_keeper : Wait until the backend is ready] ***********************
+[0;32mok: [ans-node2][0m
+
+PLAY [Verify the Artifact Keeper cluster] **************************************
+
+TASK [Create run identifier for the test artifact] *****************************
+[0;32mok: [ans-node1][0m
+
+TASK [Wait until the VIP serves a ready backend] *******************************
+[0;32mok: [ans-node1][0m
+
+TASK [Read cluster status] *****************************************************
+[0;32mok: [ans-node1][0m
+
+TASK [Show cluster status] *****************************************************
+[0;32mok: [ans-node1] => [0m
+[0;32m    msg:[0m
+[0;32m    - Artifact Keeper cluster  -  03:31:35[0m
+[0;32m    - ''[0m
+[0;32m    - 'NODE         PATRONI   AK-READY  AK-HEALTH ETCD      GARAGE    OPENSRCH '[0m
+[0;32m    - 'ans-node1    primary   200       healthy   true      200       200      '[0m
+[0;32m    - 'ans-node2    replica   200       healthy   true      200       200      '[0m
+[0;32m    - 'ans-node3    -         -         -         true      200       200      '[0m
+[0;32m    - ''[0m
+[0;32m    - 'VIP 192.168.56.60: /readyz 200        holder: ans-node1.lab.local  served by: ans-node2'[0m
+[0;32m    - 'OpenSearch: green, 3 nodes'[0m
+[0;32m    - 'Patroni:    ans-node1=leader/running TL1 lag=0   ans-node2=replica/streaming TL1[0m
+[0;32m        lag=0'[0m
+[0;32m    - 'HAProxy ans-node1: ak_api/ans-node1=UP ak_api/ans-node2=UP ak_web/ans-node1=UP[0m
+[0;32m        ak_web/ans-node2=UP postgres/ans-node1=UP postgres/ans-node2=DOWN s3/ans-node1=UP[0m
+[0;32m        s3/ans-node2=UP s3/ans-node3=UP opensearch/ans-node1=UP opensearch/ans-node2=UP[0m
+[0;32m        opensearch/ans-node3=UP '[0m
+[0;32m    - 'HAProxy ans-node2: ak_api/ans-node1=UP ak_api/ans-node2=UP ak_web/ans-node1=UP[0m
+[0;32m        ak_web/ans-node2=UP postgres/ans-node1=UP postgres/ans-node2=DOWN s3/ans-node1=UP[0m
+[0;32m        s3/ans-node2=UP s3/ans-node3=UP opensearch/ans-node1=UP opensearch/ans-node2=UP[0m
+[0;32m        opensearch/ans-node3=UP '[0m
+
+TASK [Log in as admin] *********************************************************
+[0;32mok: [ans-node1][0m
+
+TASK [Create test repository (generic, local)] *********************************
+[0;32mok: [ans-node1][0m
+
+TASK [Upload test artifact through the VIP] ************************************
+[0;33mchanged: [ans-node1][0m
+
+TASK [Download test artifact through the VIP] **********************************
+[0;32mok: [ans-node1][0m
+
+TASK [Compare downloaded content] **********************************************
+[0;32mok: [ans-node1] => [0m
+[0;32m    changed: false[0m
+[0;32m    msg: Upload/download through http://192.168.56.60 OK (served by ans-node2)[0m
+
+PLAY RECAP *********************************************************************
+[0;33mans-node1[0m                  : [0;32mok=126 [0m [0;33mchanged=2   [0m unreachable=0    failed=0    [0;36mskipped=51  [0m rescued=0    ignored=0   
+[0;33mans-node2[0m                  : [0;32mok=111 [0m [0;33mchanged=1   [0m unreachable=0    failed=0    [0;36mskipped=42  [0m rescued=0    ignored=0   
+[0;33mans-node3[0m                  : [0;32mok=52  [0m [0;33mchanged=1   [0m unreachable=0    failed=0    [0;36mskipped=18  [0m rescued=0    ignored=0   
+

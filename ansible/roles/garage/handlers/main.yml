@@ -1,0 +1,14 @@
+---
+# throttle: one member at a time, so the quorum survives a configuration change.
+# For changes on a running cluster prefer: -e infrastructure_serial=1 (waits for health per node).
+- name: Restart garage
+  become: true
+  become_user: "{{ podman_user }}"
+  ansible.builtin.systemd_service:
+    name: garage.service
+    scope: user
+    state: restarted
+    daemon_reload: true
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ podman_user_uid }}"
+  throttle: 1

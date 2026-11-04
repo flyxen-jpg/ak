@@ -1,0 +1,19 @@
+---
+# Bearer token for the Artifact Keeper API.
+
+- name: Log in to Artifact Keeper
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_ak_url }}/api/v1/auth/login"
+    method: POST
+    body_format: json
+    body:
+      username: "{{ artifactory_migration_ak_user }}"
+      password: "{{ artifactory_migration_ak_password }}"
+  register: artifactory_migration_ak_login
+  no_log: true
+
+- name: Remember the Artifact Keeper session
+  ansible.builtin.set_fact:
+    artifactory_migration_ak_auth:
+      Authorization: "Bearer {{ artifactory_migration_ak_login.json.access_token }}"
+  no_log: true

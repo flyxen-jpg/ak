@@ -1,0 +1,8 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+[Unit]
+Description=Container network of Artifactory
+
+[Network]
+NetworkName={{ artifactory_oss_network }}
+Subnet={{ artifactory_oss_subnet }}

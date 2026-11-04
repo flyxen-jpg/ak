@@ -1,0 +1,24 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+[Unit]
+Description=Caddy reverse proxy for Artifact Keeper
+Wants=ak-backend.service ak-web.service
+After=ak-backend.service ak-web.service
+
+[Container]
+ContainerName=ak-caddy
+Image={{ ak_standalone_caddy_image }}
+Pull=never
+Network=artifact-keeper.network
+# The only published port. Rootless Podman can bind ports >= 1024 without extra settings.
+PublishPort={{ ak_standalone_http_port }}:80
+Volume={{ ak_standalone_config_dir }}/Caddyfile:/etc/caddy/Caddyfile:ro
+Volume=ak-caddy-data:/data
+Volume=ak-caddy-config:/config
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

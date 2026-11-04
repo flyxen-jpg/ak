@@ -1,0 +1,170 @@
+---
+# Fixed definitions of the test data set (not meant to be overridden).
+# Repository payloads follow the internal UI API of Artifactory, the only way to create
+# repositories in the OSS edition ("This REST API is available only in Artifactory Pro").
+
+artifactory_migration_seed_local_repos:
+  - key: maven-releases
+    package_type: Maven
+    layout: maven-2-default
+    type_specific:
+      handleReleases: true
+      handleSnapshots: false
+      snapshotVersionBehavior: UNIQUE
+      localChecksumPolicy: CLIENT
+      maxUniqueSnapshots: 0
+  - key: maven-snapshots
+    package_type: Maven
+    layout: maven-2-default
+    type_specific:
+      handleReleases: false
+      handleSnapshots: true
+      snapshotVersionBehavior: UNIQUE
+      localChecksumPolicy: CLIENT
+      maxUniqueSnapshots: 10
+  - key: gradle-plugins
+    package_type: Gradle
+    layout: maven-2-default
+    type_specific:
+      handleReleases: true
+      handleSnapshots: true
+      snapshotVersionBehavior: UNIQUE
+      localChecksumPolicy: CLIENT
+      maxUniqueSnapshots: 0
+  - key: generic-files
+    package_type: Generic
+    layout: simple-default
+    type_specific: {}
+
+artifactory_migration_seed_remote_repo:
+  type: remoteRepoConfig
+  general:
+    repoKey: maven-central
+  basic:
+    layout: maven-2-default
+    includesPattern: "**/*"
+    excludesPattern: ""
+    url: https://repo1.maven.org/maven2/
+  advanced:
+    blackedOut: false
+    allowContentBrowsing: false
+    storeArtifactsLocally: true
+    propertySets: []
+    network:
+      socketTimeout: 15000
+      syncProperties: false
+      lenientHostAuth: false
+      cookieManagement: false
+    cache:
+      keepUnusedArtifactsHours: 0
+      retrievalCachePeriodSecs: 7200
+      assumedOfflineLimitSecs: 300
+      missedRetrievalCachePeriodSecs: 1800
+  typeSpecific:
+    repoType: Maven
+    url: https://repo1.maven.org/maven2/
+    handleReleases: true
+    handleSnapshots: false
+    remoteChecksumPolicy: GEN_IF_ABSENT
+
+artifactory_migration_seed_virtual_repo:
+  type: virtualRepoConfig
+  general:
+    repoKey: maven-all
+  basic:
+    layout: maven-2-default
+    includesPattern: "**/*"
+    excludesPattern: ""
+    selectedRepositories:
+      - repoName: maven-releases
+        type: local
+      - repoName: maven-snapshots
+        type: local
+      - repoName: maven-central
+        type: remote
+    defaultDeploymentRepo: maven-releases
+  advanced:
+    retrieveRemoteArtifacts: true
+    hideUnauthorizedResources: false
+    signedUrlTtl: 90
+    priorityResolution: false
+  typeSpecific:
+    repoType: Maven
+    pomCleanupPolicy: discard_active_reference
+    forceMavenAuthentication: false
+
+# Files: Maven releases (3 artifacts x 2 versions), snapshots, a Gradle plugin, 40 small
+# generic files with properties and two larger ones (5 and 20 MB).
+artifactory_migration_seed_files: >-
+  {%- set files = [] -%}
+  {%- for a in ['core', 'api', 'web'] -%}
+  {%- for v in ['1.0.0', '2.0.0'] -%}
+  {%- set p = 'com/example/' ~ a ~ '/' ~ v ~ '/' ~ a ~ '-' ~ v -%}
+  {%- set _ = files.append({'repo': 'maven-releases', 'path': p ~ '.pom', 'kb': 1, 'props': '', 'pom': [a, v]}) -%}
+  {%- set _ = files.append({'repo': 'maven-releases', 'path': p ~ '.jar', 'kb': 64 + loop.index * 32, 'props': ''}) -%}
+  {%- endfor -%}
+  {%- endfor -%}
+  {%- for b in [1, 2] -%}
+  {%- set _ = files.append({'repo': 'maven-snapshots', 'kb': 128, 'props': '',
+       'path': 'com/example/core/3.0.0-SNAPSHOT/core-3.0.0-20261104.10000' ~ b ~ '-' ~ b ~ '.jar'}) -%}
+  {%- endfor -%}
+  {%- set _ = files.append({'repo': 'gradle-plugins', 'path': 'com/example/gradle/lab-plugin/0.9.0/lab-plugin-0.9.0.jar', 'kb': 200, 'props': ''}) -%}
+  {%- for i in range(1, 41) -%}
+  {%- set _ = files.append({'repo': 'generic-files', 'path': 'releases/batch-' ~ (i // 10) ~ '/file-' ~ i ~ '.bin', 'kb': (i % 9) + 1,
+       'props': ';team=' ~ ('platform' if i is even else 'apps') ~ ';build.number=' ~ i ~ ';env=prod'}) -%}
+  {%- endfor -%}
+  {%- set _ = files.append({'repo': 'generic-files', 'path': 'isos/medium-5mb.bin', 'kb': 5120, 'props': ';type=medium'}) -%}
+  {%- set _ = files.append({'repo': 'generic-files', 'path': 'isos/large-20mb.bin', 'kb': 20480, 'props': ';type=large'}) -%}
+  {{ files }}
+
+# Cached through the virtual repository, so the remote cache has content to migrate.
+artifactory_migration_seed_remote_paths:
+  - junit/junit/4.13.2/junit-4.13.2.pom
+  - org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar
+
+artifactory_migration_seed_groups:
+  - name: developers
+    description: Entwickler
+  - name: release-managers
+    description: Release-Team
+
+# Permission targets as in the evaluation: one with an exclude pattern (not mappable).
+artifactory_migration_seed_permissions:
+  - name: dev-write
+    resources:
+      artifact:
+        actions:
+          users: {}
+          groups:
+            developers: [READ, WRITE, ANNOTATE]
+        targets:
+          maven-snapshots:
+            include_patterns: ["**"]
+            exclude_patterns: []
+          generic-files:
+            include_patterns: ["**"]
+            exclude_patterns: ["isos/**"]
+  - name: release-deploy
+    resources:
+      artifact:
+        actions:
+          users:
+            carol: [READ, WRITE, DELETE]
+          groups:
+            release-managers: [READ, WRITE, DELETE, ANNOTATE]
+            developers: [READ]
+        targets:
+          maven-releases:
+            include_patterns: ["**"]
+            exclude_patterns: []
+          gradle-plugins:
+            include_patterns: ["**"]
+            exclude_patterns: []
+
+# Artifactory action -> Artifact Keeper action.
+artifactory_migration_action_map:
+  READ: read
+  WRITE: write
+  ANNOTATE: write
+  DELETE: delete
+  MANAGE: admin

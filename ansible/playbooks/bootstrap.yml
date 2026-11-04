@@ -1,0 +1,11 @@
+---
+# First run against freshly installed nodes (once, before site.yml):
+#   tools/copy-ssh-keys.sh inventories/natnetwork/hosts.yml      # asks for each node's password
+#   ansible-playbook -i inventories/natnetwork/hosts.yml playbooks/bootstrap.yml -K
+# -K asks for the sudo password of the administrator account created during installation.
+- name: Prepare freshly installed nodes for Ansible
+  hosts: all
+  gather_facts: true
+  roles:
+    - role: bootstrap
+      tags: [bootstrap]

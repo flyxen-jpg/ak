@@ -1,0 +1,91 @@
+---
+# One-time cluster bootstrap: connect nodes, assign the layout, create key and bucket.
+# Every step checks the current state first, so re-runs change nothing.
+# Later layout changes (adding nodes, capacity) are a deliberate operator task, see docs.
+# Loops use ansible_play_batch: with serial (rolling changes) only the current batch has node IDs.
+
+- name: Read Garage node ID
+  become: true
+  become_user: "{{ podman_user }}"
+  ansible.builtin.command: podman exec garage /garage node id --quiet
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ podman_user_uid }}"
+  register: garage_node_id
+  changed_when: false
+
+# Role defaults are not visible through hostvars; publish the per-node layout values as facts
+# so the bootstrap task on the first node can read them for every node.
+- name: Publish layout values of this node
+  ansible.builtin.set_fact:
+    garage_node_zone: "{{ garage_zone }}"
+    garage_node_capacity: "{{ garage_capacity }}"
+
+- name: Bootstrap Garage cluster from the first node
+  run_once: true
+  become: true
+  become_user: "{{ podman_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ podman_user_uid }}"
+  block:
+    - name: Read current Garage cluster status
+      ansible.builtin.command: podman exec garage /garage status
+      register: garage_status
+      changed_when: false
+
+    - name: Connect missing Garage peers
+      ansible.builtin.command: podman exec garage /garage node connect {{ hostvars[item]['garage_node_id']['stdout'] }}
+      loop: "{{ ansible_play_batch }}"
+      when: hostvars[item]['garage_node_id']['stdout'].split('@')[0][:16] not in garage_status.stdout
+      changed_when: true
+
+    - name: Read current Garage layout
+      ansible.builtin.command: podman exec garage /garage layout show
+      register: garage_layout
+      changed_when: false
+
+    - name: Assign zone and capacity to every node
+      ansible.builtin.command: >-
+        podman exec garage /garage layout assign
+        -z {{ hostvars[item]['garage_node_zone'] }}
+        -c {{ hostvars[item]['garage_node_capacity'] }}
+        {{ hostvars[item]['garage_node_id']['stdout'].split('@')[0] }}
+      loop: "{{ ansible_play_batch }}"
+      when: "garage_layout.stdout is search('version: 0([^0-9]|$)')"
+      changed_when: true
+
+    - name: Apply initial layout
+      ansible.builtin.command: podman exec garage /garage layout apply --version 1
+      when: "garage_layout.stdout is search('version: 0([^0-9]|$)')"
+      changed_when: true
+
+    - name: Check whether the access key exists
+      ansible.builtin.command: podman exec garage /garage key info {{ garage_key_name }}
+      register: garage_key_info
+      changed_when: false
+      failed_when: false
+
+    - name: Import access key for Artifact Keeper
+      ansible.builtin.command: >-
+        podman exec garage /garage key import --yes -n {{ garage_key_name }}
+        {{ garage_access_key_id }} {{ garage_secret_access_key }}
+      when: garage_key_info.rc != 0
+      changed_when: true
+      no_log: true
+
+    - name: Check whether the bucket exists
+      ansible.builtin.command: podman exec garage /garage bucket info {{ garage_bucket }}
+      register: garage_bucket_info
+      changed_when: false
+      failed_when: false
+
+    - name: Create bucket
+      ansible.builtin.command: podman exec garage /garage bucket create {{ garage_bucket }}
+      when: garage_bucket_info.rc != 0
+      changed_when: true
+
+    - name: Grant the access key full rights on the bucket
+      ansible.builtin.command: >-
+        podman exec garage /garage bucket allow --read --write --owner
+        {{ garage_bucket }} --key {{ garage_key_name }}
+      when: garage_bucket_info.rc != 0 or garage_key_info.rc != 0
+      changed_when: true

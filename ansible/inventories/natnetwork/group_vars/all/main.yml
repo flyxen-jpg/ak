@@ -1,0 +1,30 @@
+---
+# Environment settings: VirtualBox NAT Network, internet access through NAT.
+ak_offline: false
+
+# Subnet of the NAT Network (VirtualBox: Tools, Network, NAT Networks).
+ak_cluster_network: 10.0.10.0/24
+ak_cluster_ip: "{{ ansible_host }}"
+# Floating IP of keepalived. Choose an address the NAT Network DHCP server does not hand out
+# in practice (it assigns from the bottom of the range); the keepalived pre-flight check
+# aborts if the address is in use.
+ak_vip: 10.0.10.250
+ak_domain: lab.local
+# How users reach the cluster. With a NAT Network the host reaches the VIP only through a
+# port forwarding rule of the NAT Network, e.g. host 30090 -> 10.0.10.250:80.
+ak_external_url: "http://localhost:30090"
+ak_firewall_zone: ak-cluster
+
+# The Artifact Keeper backends may connect to the migration source (Artifactory on ak-ha3).
+artifact_keeper_ssrf_allow_private_cidrs: "{{ hostvars['ak-ha3']['ansible_host'] }}/32"
+
+# Artifactory on the quorum node: smaller heap, port open in the cluster zone.
+artifactory_oss_java_opts: "-Xms512m -Xmx1024m"
+artifactory_oss_firewall_zones:
+  - "{{ ak_firewall_zone }}"
+  - public
+
+# Migration playbooks run on ak-ha3 (see group migration_runner).
+artifactory_migration_ak_url: "http://{{ ak_vip }}"
+artifactory_migration_rt_url: "http://127.0.0.1:8082"
+artifactory_migration_source_url: "http://{{ hostvars['ak-ha3']['ansible_host'] }}:8082/artifactory"

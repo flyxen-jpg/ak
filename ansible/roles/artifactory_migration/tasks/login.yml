@@ -1,0 +1,41 @@
+---
+# Sessions for both APIs. Artifactory OSS only exposes users, groups, permissions and
+# repository creation through its internal UI API, which needs a session cookie.
+
+- name: Log in to the Artifactory UI API
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_rt_url }}/ui/api/v1/ui/auth/login"
+    method: POST
+    body_format: json
+    body:
+      user: "{{ artifactory_migration_rt_user }}"
+      password: "{{ artifactory_migration_rt_password }}"
+      type: login
+    headers:
+      X-Requested-With: XMLHttpRequest
+  register: artifactory_migration_rt_login
+  # Shortly after a (re)start Artifactory rejects or delays UI logins for a while.
+  until: artifactory_migration_rt_login.status == 200
+  retries: 10
+  delay: 15
+  no_log: true
+
+- name: Log in to Artifact Keeper
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_ak_url }}/api/v1/auth/login"
+    method: POST
+    body_format: json
+    body:
+      username: "{{ artifactory_migration_ak_user }}"
+      password: "{{ artifactory_migration_ak_password }}"
+  register: artifactory_migration_ak_login
+  no_log: true
+
+- name: Remember session headers
+  ansible.builtin.set_fact:
+    artifactory_migration_rt_ui:
+      Cookie: "{{ artifactory_migration_rt_login.cookies_string }}"
+      X-Requested-With: XMLHttpRequest
+    artifactory_migration_ak_auth:
+      Authorization: "Bearer {{ artifactory_migration_ak_login.json.access_token }}"
+  no_log: true

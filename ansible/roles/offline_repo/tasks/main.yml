@@ -1,0 +1,97 @@
+---
+# Provides all RPMs from the offline bundle as a local dnf repository on every node.
+# Why a local file:// repository: no web server or extra software is needed on the control
+# node or the targets, and dnf still resolves dependencies and verifies GPG signatures.
+
+- name: Read bundle identifier on the control node
+  ansible.builtin.set_fact:
+    offline_repo_bundle_id: "{{ lookup('ansible.builtin.file', offline_repo_bundle_dir ~ '/BUNDLE_ID') }}"
+    offline_repo_gpg_keys: "{{ lookup('ansible.builtin.fileglob', offline_repo_bundle_dir ~ '/rpm-gpg/*', wantlist=true) | map('basename') | list }}"
+
+- name: Create repository directory for this bundle
+  become: true
+  ansible.builtin.file:
+    path: "{{ offline_repo_base_dir }}/{{ offline_repo_bundle_id }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Unpack RPM repository from the bundle
+  become: true
+  ansible.builtin.unarchive:
+    src: "{{ offline_repo_bundle_dir }}/rpms.tar"
+    dest: "{{ offline_repo_base_dir }}/{{ offline_repo_bundle_id }}"
+    creates: "{{ offline_repo_base_dir }}/{{ offline_repo_bundle_id }}/repodata/repomd.xml"
+    # Keep root ownership and the directory mode set above (the archive was packed by the
+    # builder's user); otherwise the next run would "fix" the directory again.
+    extra_opts:
+      - --no-same-owner
+      - --no-overwrite-dir
+
+- name: Install vendor GPG keys shipped with the bundle
+  become: true
+  ansible.builtin.copy:
+    src: "{{ offline_repo_bundle_dir }}/rpm-gpg/{{ item }}"
+    dest: "/etc/pki/rpm-gpg/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ offline_repo_gpg_keys }}"
+
+- name: Configure local repository (signatures of Rocky, EPEL and PGDG are verified)
+  become: true
+  ansible.builtin.yum_repository:
+    name: "{{ offline_repo_name }}"
+    description: "Artifact Keeper offline bundle {{ offline_repo_bundle_id }}"
+    baseurl: "file://{{ offline_repo_base_dir }}/{{ offline_repo_bundle_id }}"
+    gpgcheck: true
+    # Repository metadata is generated locally and therefore not signed.
+    repo_gpgcheck: false
+    gpgkey: "{{ offline_repo_gpg_keys | map('regex_replace', '^', 'file:///etc/pki/rpm-gpg/') | list }}"
+    enabled: true
+
+- name: Find other repository definitions
+  ansible.builtin.find:
+    paths: /etc/yum.repos.d
+    patterns: "*.repo"
+    excludes: "{{ offline_repo_name }}.repo"
+  register: offline_repo_other_repos
+  when: offline_repo_disable_others
+
+- name: Disable online repositories
+  become: true
+  ansible.builtin.replace:
+    path: "{{ item.path }}"
+    regexp: '^enabled\s*=\s*1'
+    replace: "enabled=0"
+  loop: "{{ offline_repo_other_repos.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when: offline_repo_disable_others
+
+- name: Stop periodic metadata refresh (would only produce network errors)
+  become: true
+  ansible.builtin.systemd_service:
+    name: dnf-makecache.timer
+    state: stopped
+    enabled: false
+  when: offline_repo_disable_others
+
+- name: Remove repositories of previous bundles
+  block:
+    - name: Find unpacked bundles
+      ansible.builtin.find:
+        paths: "{{ offline_repo_base_dir }}"
+        file_type: directory
+        excludes: "{{ offline_repo_bundle_id }}"
+      register: offline_repo_old_bundles
+
+    - name: Delete outdated bundle directories
+      become: true
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ offline_repo_old_bundles.files }}"
+      loop_control:
+        label: "{{ item.path }}"

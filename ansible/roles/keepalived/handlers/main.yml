@@ -1,0 +1,9 @@
+---
+# keepalived has no safe reload for VRRP changes; a restart of the BACKUP node is harmless,
+# a restart of the VIP holder moves the VIP for a few seconds.
+- name: Restart keepalived
+  become: true
+  ansible.builtin.systemd_service:
+    name: keepalived
+    state: restarted
+  throttle: 1

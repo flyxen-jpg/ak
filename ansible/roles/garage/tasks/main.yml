@@ -1,0 +1,88 @@
+---
+- name: Verify that the Garage secrets are defined
+  ansible.builtin.assert:
+    that:
+      - garage_rpc_secret is match('^[0-9a-f]{64}$')
+      - garage_admin_token | length >= 16
+      - garage_access_key_id is match('^GK[0-9a-f]{24}$')
+      - garage_secret_access_key is match('^[0-9a-f]{64}$')
+    fail_msg: Garage secrets are missing or malformed (see roles/garage/defaults/main.yml).
+    quiet: true
+
+- name: Open Garage ports in the cluster zone
+  become: true
+  ansible.posix.firewalld:
+    zone: "{{ garage_firewall_zone }}"
+    port: "{{ item }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - "{{ garage_s3_port }}"
+    - "{{ garage_rpc_port }}"
+    - "{{ garage_admin_port }}"
+
+- name: Provide Garage image
+  ansible.builtin.include_role:
+    name: podman
+    tasks_from: image.yml
+  vars:
+    podman_image: "{{ garage_image }}"
+
+- name: Create Garage configuration directory
+  become: true
+  ansible.builtin.file:
+    path: "{{ garage_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ podman_user }}"
+    mode: "0750"
+
+# The file is mounted into the container; container_file_t allows access under SELinux
+# without the ":Z" relabel option (rootless Podman cannot relabel root-owned files).
+- name: Write Garage configuration
+  become: true
+  ansible.builtin.template:
+    src: garage.toml.j2
+    dest: "{{ garage_config_dir }}/garage.toml"
+    owner: root
+    group: "{{ podman_user }}"
+    mode: "0640"
+    setype: container_file_t
+  notify: Restart garage
+
+- name: Install Garage Quadlet unit
+  become: true
+  ansible.builtin.template:
+    src: garage.container.j2
+    dest: "{{ podman_quadlet_dir }}/garage.container"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart garage
+
+- name: Apply pending Garage restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Start Garage
+  become: true
+  become_user: "{{ podman_user }}"
+  ansible.builtin.systemd_service:
+    name: garage.service
+    scope: user
+    state: started
+    daemon_reload: true
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ podman_user_uid }}"
+
+- name: Wait for the Garage admin API
+  ansible.builtin.uri:
+    url: "http://{{ garage_listen_ip }}:{{ garage_admin_port }}/health"
+    status_code: [200, 503]
+  register: garage_health
+  until: garage_health.status in [200, 503]
+  retries: 20
+  delay: 3
+
+- name: Import cluster bootstrap tasks
+  ansible.builtin.import_tasks: cluster.yml

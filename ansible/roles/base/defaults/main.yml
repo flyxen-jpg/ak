@@ -1,0 +1,43 @@
+---
+# Packages every cluster node needs (tools used by the roles and for troubleshooting).
+base_packages:
+  - acl
+  - bind-utils
+  - chrony
+  - curl
+  - firewalld
+  - jq
+  - openssl
+  - policycoreutils-python-utils
+  - python3-libselinux
+  - python3-libsemanage
+  - tar
+
+# Kernel parameters for all nodes.
+base_sysctl:
+  # OpenSearch needs many memory-mapped areas (bootstrap check).
+  vm.max_map_count: 262144
+  # Prefer page cache eviction over swapping service memory.
+  vm.swappiness: 10
+
+# Time servers. Empty list keeps the distribution default (public pools).
+# Air-gapped sites must point this to an internal NTP server.
+base_chrony_servers: []
+
+# Write all cluster nodes into /etc/hosts (disable when DNS is reliable).
+base_manage_etc_hosts: true
+# Group whose members are written into /etc/hosts.
+base_hosts_group: ak_cluster
+
+# firewalld zone for cluster-internal traffic; only ak_cluster_network may use it.
+base_firewall_zone: "{{ ak_firewall_zone }}"
+base_firewall_sources:
+  - "{{ ak_cluster_network }}"
+# Services allowed in the cluster zone. ssh is essential: once the cluster network is bound to
+# this zone, connections from it (e.g. the Ansible control node) no longer use the default
+# zone - without ssh here the node locks Ansible out.
+base_firewall_services:
+  - ssh
+
+# Operator status script (status of all components in one view).
+base_status_script: /usr/local/bin/ak-cluster-status

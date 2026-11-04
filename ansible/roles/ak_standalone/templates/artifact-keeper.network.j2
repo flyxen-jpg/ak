@@ -1,0 +1,9 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+[Unit]
+Description=Container network of Artifact Keeper
+
+[Network]
+NetworkName={{ ak_standalone_network }}
+# Fixed subnet: the backend trusts X-Forwarded-For only from this range (Caddy).
+Subnet={{ ak_standalone_subnet }}

@@ -1,0 +1,39 @@
+---
+- name: Verify that the node runs Rocky Linux / RHEL 10
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] == 'RedHat'
+      - ansible_facts['distribution_major_version'] == '10'
+    fail_msg: "Rocky Linux / RHEL 10 required, found {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
+    quiet: true
+
+- name: Verify that the inventory address belongs to this node
+  ansible.builtin.assert:
+    that: ansible_host in ansible_facts['all_ipv4_addresses']
+    fail_msg: >-
+      ansible_host={{ ansible_host }} is not configured on {{ inventory_hostname }}
+      (addresses: {{ ansible_facts['all_ipv4_addresses'] | join(', ') }}). Fix the inventory.
+    quiet: true
+
+- name: Allow passwordless sudo for {{ ansible_user_id }}
+  become: true
+  ansible.builtin.copy:
+    dest: "{{ bootstrap_sudoers_file }}"
+    content: |
+      # Managed by Ansible (role bootstrap): unattended runs of the Ansible project.
+      {{ ansible_user_id }} ALL=(ALL) NOPASSWD: ALL
+    owner: root
+    group: root
+    mode: "0440"
+    validate: visudo -cf %s
+  when: bootstrap_passwordless_sudo
+
+- name: Set host name
+  become: true
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+  when: bootstrap_set_hostname
+
+- name: Import static address tasks
+  ansible.builtin.import_tasks: static_ip.yml
+  when: bootstrap_static_ip

@@ -1,0 +1,198 @@
+# =============================================================================
+# Artifact Keeper - Podman-optimierte Compose-Datei
+# =============================================================================
+# Basis: https://github.com/artifact-keeper/artifact-keeper/blob/main/docker-compose.yml
+#
+# Aenderungen gegenueber dem Original (fuer rootless Podman + SELinux):
+#   * x-podman.in_pod=false: podman-compose packt sonst alle Container in einen
+#     gemeinsamen Pod (gemeinsamer Netz-Namespace, Port-Konflikte, keine
+#     per-Container-Healthchecks in depends_on).
+#   * restart: always statt unless-stopped. Nur "always"-Container werden nach
+#     einem Reboot von podman-restart.service wieder gestartet.
+#   * Dependency-Track (Profil "dtrack") ist in compose.dtrack.yaml ausgelagert.
+#     Die optionale Abhaengigkeit `required: false` im Backend versteht
+#     podman-compose nicht und bricht ohne aktives Profil ab.
+#   * Postgres/OpenSearch werden NICHT auf den Host gepublisht (nur intern im
+#     Compose-Netz erreichbar). Bei Bedarf compose.dev.yaml verwenden.
+#   * Keine Init-Container (pg-certs, scan-workspace-init): podman-compose macht
+#     aus depends_on ein `podman --requires`, und Podman verweigert den Start,
+#     sobald ein benoetigter Container beendet ist ("container state improper"),
+#     auch nach jedem Reboot. Ersatz: TLS-Zertifikate erzeugt setup.sh auf dem
+#     Host; das Scan-Volume wird per Mount-Option :U auf uid 1001 gechownt.
+#   * Bind-Mounts mit :Z (privates SELinux-Label) statt :z.
+#   * OpenSearch: nofile/memlock-ulimits innerhalb der rootless-Grenzen.
+#   * Secrets kommen ausschliesslich aus .env (siehe .env.example).
+# =============================================================================
+
+x-podman:
+  in_pod: false
+
+services:
+  postgres:
+    image: docker.io/library/postgres:18-alpine
+    container_name: artifact-keeper-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-registry}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD in .env setzen}
+      POSTGRES_DB: artifact_registry
+    volumes:
+      # Postgres 18+: Mount auf /var/lib/postgresql (nicht .../data)
+      - postgres_data:/var/lib/postgresql
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro,Z
+      - ./docker/init-pg-ssl.sh:/docker-entrypoint-initdb.d/init-pg-ssl.sh:ro,Z
+      # Zertifikate erzeugt setup.sh auf dem Host (Owner 70:70 via podman unshare)
+      - ./docker/certs:/var/lib/postgresql/certs:ro,Z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d artifact_registry"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: always
+
+  backend:
+    image: ghcr.io/artifact-keeper/artifact-keeper-backend:${ARTIFACT_KEEPER_VERSION:-latest}
+    container_name: artifact-keeper-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-registry}:${POSTGRES_PASSWORD}@postgres:5432/artifact_registry?sslmode=require
+      STORAGE_PATH: /data/storage
+      BACKUP_PATH: /data/backups
+      PLUGINS_DIR: /data/plugins
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET in .env setzen (openssl rand -base64 48)}
+      AK_WEBHOOK_SECRET_KEY: ${AK_WEBHOOK_SECRET_KEY:?AK_WEBHOOK_SECRET_KEY in .env setzen (openssl rand -base64 32)}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      RUST_LOG: ${RUST_LOG:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-text}
+      LOG_ANSI: "false"
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:30080}
+      RATE_LIMIT_TRUSTED_PROXY_CIDRS: 172.30.0.0/24
+      XFF_TRUSTED_FOR_AUTHZ: "false"
+      TRIVY_URL: http://trivy:8090
+      OPENSCAP_URL: http://openscap:8091
+      SCAN_WORKSPACE_PATH: /scan-workspace
+      OPENSEARCH_URL: http://opensearch:9200
+      DEPENDENCY_TRACK_ENABLED: "false"
+      ALLOW_HTTP_INTEGRATIONS: "1"
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      no_proxy: "${NO_PROXY:-},localhost,127.0.0.1,postgres,opensearch,trivy,openscap,dependency-track-apiserver"
+      HOST: 0.0.0.0
+      PORT: 8080
+    volumes:
+      - artifact_storage:/data/storage
+      - backup_storage:/data/backups
+      - plugins_storage:/data/plugins
+      # :U = Podman chownt das Volume auf den Container-User (1001) -> ersetzt scan-workspace-init
+      - scan_workspace:/scan-workspace:U
+      - shared_config:/shared:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/livez"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    restart: always
+
+  opensearch:
+    image: docker.io/opensearchproject/opensearch:2.19.6
+    container_name: artifact-keeper-opensearch
+    environment:
+      discovery.type: single-node
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 30s
+    restart: always
+
+  trivy:
+    image: ghcr.io/aquasecurity/trivy:0.76.0
+    container_name: artifact-keeper-trivy
+    command: ["server", "--listen", "0.0.0.0:8090"]
+    volumes:
+      - trivy_cache:/root/.cache/trivy
+      - scan_workspace:/scan-workspace:ro
+    restart: always
+
+  openscap:
+    image: ghcr.io/artifact-keeper/artifact-keeper-openscap:${ARTIFACT_KEEPER_VERSION:-latest}
+    container_name: artifact-keeper-openscap
+    volumes:
+      - scan_workspace:/scan-workspace:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8091/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: always
+
+  web:
+    image: ghcr.io/artifact-keeper/artifact-keeper-web:${ARTIFACT_KEEPER_WEB_VERSION:-latest}
+    container_name: artifact-keeper-web
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      BACKEND_URL: http://backend:8080
+    restart: always
+
+  caddy:
+    image: docker.io/library/caddy:2-alpine
+    container_name: artifact-keeper-caddy
+    depends_on:
+      backend:
+        condition: service_healthy
+      web:
+        condition: service_started
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "localhost,127.0.0.1"
+      no_proxy: "localhost,127.0.0.1"
+    ports:
+      # rootless Podman: Ports >= 1024 ohne sysctl-Aenderung moeglich
+      - "${HTTP_PORT:-30080}:80"
+      - "${HTTPS_PORT:-30443}:443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro,Z
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: always
+
+volumes:
+  postgres_data:
+  artifact_storage:
+  backup_storage:
+  plugins_storage:
+  trivy_cache:
+  opensearch_data:
+  scan_workspace:
+  caddy_data:
+  caddy_config:
+  shared_config:
+
+networks:
+  default:
+    name: artifact-keeper-network
+    ipam:
+      config:
+        # muss zu RATE_LIMIT_TRUSTED_PROXY_CIDRS im Backend passen
+        - subnet: 172.30.0.0/24

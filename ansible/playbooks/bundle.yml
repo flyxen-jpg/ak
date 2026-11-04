@@ -1,0 +1,238 @@
+---
+# Builds the offline bundle on a machine WITH internet access (same OS release as the targets:
+# Rocky Linux / RHEL 10, x86_64). The result is transferred into the air-gapped network.
+#
+#   ansible-playbook playbooks/bundle.yml [-e bundle_dir=/srv/ak-bundle]
+#
+# Single source of truth: package lists and image names are read from the role defaults,
+# so the bundle always matches exactly what the roles will install.
+- name: Build offline bundle
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    bundle_dir: /srv/ak-bundle
+    bundle_project_dir: "{{ playbook_dir | dirname }}"
+    bundle_role_defaults:
+      - base
+      - podman
+      - etcd
+      - garage
+      - opensearch
+      - patroni
+      - haproxy
+      - keepalived
+      - artifact_keeper
+    # Installed on the offline control node from the bundle (see tools/install-control-node.sh).
+    bundle_control_node_packages:
+      - ansible-core
+    # Baseline the dependency resolution starts from: what a minimal installation contains.
+    bundle_resolve_base:
+      - "@core"
+      - selinux-policy-targeted
+    bundle_resolve_root: /var/tmp/ak-bundle-root
+    bundle_builder_packages:
+      - createrepo_c
+      - dnf-plugins-core
+      - podman
+      - tar
+    bundle_gpg_key_patterns:
+      - RPM-GPG-KEY-Rocky-*
+      - RPM-GPG-KEY-EPEL-*
+      - PGDG-RPM-GPG-KEY-*
+  tasks:
+    - name: Verify builder platform
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution_major_version'] == '10'
+          - ansible_facts['architecture'] == 'x86_64'
+        fail_msg: Build the bundle on the same OS release and architecture as the targets.
+        quiet: true
+
+    - name: Load role defaults (package lists and image names)
+      ansible.builtin.include_vars:
+        file: "{{ bundle_project_dir }}/roles/{{ item }}/defaults/main.yml"
+      loop: "{{ bundle_role_defaults }}"
+
+    # Defaults reference inventory globals; neutral values are enough for package/image names.
+    - name: Define neutral values for inventory globals
+      ansible.builtin.set_fact:
+        ak_cluster_ip: 127.0.0.1
+        ak_cluster_network: 127.0.0.0/8
+        ak_firewall_zone: ak-cluster
+        ak_offline: false
+
+    - name: Assemble bundle contents
+      ansible.builtin.set_fact:
+        bundle_packages: >-
+          {{ (base_packages + podman_packages + patroni_packages + haproxy_packages
+              + keepalived_packages + bundle_control_node_packages) | unique | sort }}
+        bundle_images:
+          - "{{ etcd_image }}"
+          - "{{ garage_image }}"
+          - "{{ opensearch_image }}"
+          - "{{ artifact_keeper_backend_image }}"
+          - "{{ artifact_keeper_web_image }}"
+
+    - name: Install builder tools and the EPEL repository
+      become: true
+      ansible.builtin.dnf:
+        name: "{{ bundle_builder_packages + [patroni_epel_package] }}"
+        state: present
+
+    - name: Import PGDG signing key
+      become: true
+      ansible.builtin.rpm_key:
+        key: "{{ patroni_pgdg_gpg_key_url }}"
+        state: present
+
+    - name: Install PGDG repository
+      become: true
+      ansible.builtin.dnf:
+        name: "{{ patroni_pgdg_repo_rpm_url }}"
+        state: present
+
+    - name: Create bundle directories
+      become: true
+      ansible.builtin.file:
+        path: "{{ bundle_dir }}/{{ item }}"
+        state: directory
+        owner: "{{ ansible_facts['user_id'] }}"
+        mode: "0755"
+      loop:
+        - ""
+        - rpms
+        - rpm-gpg
+        - images
+        - collections
+
+    - name: Start from an empty resolver root
+      become: true
+      ansible.builtin.file:
+        path: "{{ bundle_resolve_root }}"
+        state: absent
+
+    # Resolve exactly like a real installation on a minimal system: a dnf transaction into an
+    # empty installroot with @core plus all packages. Unlike "dnf download --resolve --alldeps"
+    # this also follows conditional (rich) dependencies such as
+    # "(passt-selinux if selinux-policy-targeted)" - without them podman cannot be installed
+    # offline (found in the lab test). Host repositories and dnf variables are used; the full
+    # release (10.2) is passed because PGDG builds its URLs from $releasever_minor.
+    # --nogpgcheck only for this download into a throw-away root (its rpmdb has no keys);
+    # the targets verify every package against the vendor keys at install time (gpgcheck=1).
+    - name: Download RPMs with the complete dependency closure
+      become: true
+      ansible.builtin.command:
+        argv: >-
+          {{ ['dnf', '-y', '-q', 'install', '--downloadonly',
+              '--downloaddir', bundle_dir ~ '/rpms',
+              '--installroot', bundle_resolve_root,
+              '--releasever', ansible_facts['distribution_version'],
+              '--setopt=reposdir=/etc/yum.repos.d', '--setopt=varsdir=/etc/dnf/vars',
+              '--nogpgcheck']
+             + bundle_resolve_base + bundle_packages }}
+      changed_when: true
+
+    - name: Remove resolver root
+      become: true
+      ansible.builtin.file:
+        path: "{{ bundle_resolve_root }}"
+        state: absent
+
+    - name: Create repository metadata
+      ansible.builtin.command: createrepo_c --quiet --update {{ bundle_dir }}/rpms
+      changed_when: true
+
+    # The archive module is not part of ansible-core; tar keeps the builder dependency-free.
+    - name: Pack RPM repository
+      ansible.builtin.command: tar -C {{ bundle_dir }}/rpms -cf {{ bundle_dir }}/rpms.tar . # noqa: command-instead-of-module
+      changed_when: true
+
+    - name: Find vendor GPG keys
+      ansible.builtin.find:
+        paths: /etc/pki/rpm-gpg
+        patterns: "{{ bundle_gpg_key_patterns }}"
+        # Never trust the distribution's testing key on production systems.
+        excludes: "*Testing*"
+      register: bundle_gpg_keys
+
+    - name: Copy vendor GPG keys
+      ansible.builtin.copy:
+        src: "{{ item.path }}"
+        dest: "{{ bundle_dir }}/rpm-gpg/"
+        mode: "0644"
+      loop: "{{ bundle_gpg_keys.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Pull container images
+      ansible.builtin.command: podman pull --quiet {{ item }}
+      loop: "{{ bundle_images }}"
+      changed_when: true
+
+    # Archive name scheme must match roles/podman/tasks/image.yml.
+    - name: Save container images
+      ansible.builtin.command: >-
+        podman save --quiet --format docker-archive
+        -o {{ bundle_dir }}/images/{{ item | regex_replace('[/:@]', '_') }}.tar {{ item }}
+      args:
+        creates: "{{ bundle_dir }}/images/{{ item | regex_replace('[/:@]', '_') }}.tar"
+      loop: "{{ bundle_images }}"
+
+    - name: Download Ansible collections
+      ansible.builtin.command: >-
+        ansible-galaxy collection download
+        -r {{ bundle_project_dir }}/requirements.yml -p {{ bundle_dir }}/collections
+      changed_when: true
+
+    - name: Pack the Ansible project # noqa: command-instead-of-module
+      ansible.builtin.command: >-
+        tar -C {{ bundle_project_dir | dirname }} -czf {{ bundle_dir }}/ansible-project.tar.gz
+        --exclude=collections/ansible_collections --exclude=.cache --exclude=vault.yml
+        {{ bundle_project_dir | basename }}
+      changed_when: true
+
+    - name: Write manifest
+      ansible.builtin.copy:
+        dest: "{{ bundle_dir }}/MANIFEST.yml"
+        mode: "0644"
+        content: |
+          # Offline bundle for the Artifact Keeper HA cluster
+          created: {{ ansible_facts['date_time']['iso8601'] }}
+          builder: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}
+          packages:
+          {{ bundle_packages | to_nice_yaml | indent(2, true) }}
+          images:
+          {{ bundle_images | to_nice_yaml | indent(2, true) }}
+      register: bundle_manifest
+
+    - name: Write bundle identifier
+      ansible.builtin.copy:
+        dest: "{{ bundle_dir }}/BUNDLE_ID"
+        mode: "0644"
+        content: "{{ ansible_facts['date_time']['date'] | replace('-', '') }}-{{ bundle_manifest.checksum[:8] }}"
+
+    - name: Write checksums of all files
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          find . -path ./rpms -prune -o -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+        chdir: "{{ bundle_dir }}"
+      changed_when: true
+
+    - name: Remove unpacked RPM directory (content is in rpms.tar)
+      ansible.builtin.file:
+        path: "{{ bundle_dir }}/rpms"
+        state: absent
+
+    - name: Measure bundle size
+      ansible.builtin.command: du -sh {{ bundle_dir }}
+      register: bundle_size
+      changed_when: false
+
+    - name: Show result
+      ansible.builtin.debug:
+        msg:
+          - "Bundle {{ bundle_dir }} ready ({{ bundle_size.stdout.split()[0] }})."
+          - "{{ bundle_packages | length }} requested packages, {{ bundle_images | length }} images."
+          - "Transfer the directory, then verify it with: cd {{ bundle_dir }} && sha256sum -c SHA256SUMS"

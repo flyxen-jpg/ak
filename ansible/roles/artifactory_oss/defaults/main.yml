@@ -1,0 +1,37 @@
+---
+# JFrog Artifactory OSS with its own PostgreSQL as rootless Podman Quadlets.
+# Based on the official compose bundle (templates/docker-compose-volumes.yaml).
+artifactory_oss_version: 7.161.26
+# artifactory-oss (Community Edition) or artifactory-jcr (JFrog Container Registry).
+artifactory_oss_edition: artifactory-oss
+artifactory_oss_registry: releases-docker.jfrog.io
+artifactory_oss_image: "{{ artifactory_oss_registry }}/jfrog/{{ artifactory_oss_edition }}:{{ artifactory_oss_version }}"
+artifactory_oss_postgres_image: "{{ artifactory_oss_registry }}/postgres:17.10-alpine"
+
+# Router port: web UI, REST API and repositories (http://<host>:8082/artifactory/...).
+artifactory_oss_http_port: 8082
+
+# Own container network with a fixed address for Artifactory. Other stacks (the Artifact
+# Keeper backend as migration client) can join it and allow exactly this address.
+artifactory_oss_network: artifactory
+artifactory_oss_subnet: 10.89.41.0/24
+artifactory_oss_ip: 10.89.41.10
+
+artifactory_oss_config_dir: /etc/artifactory
+# Java heap. 1.2 GB is enough for evaluation; production installations use 4 GB and more.
+artifactory_oss_java_opts: "-Xms512m -Xmx1200m"
+
+# Artifactory starts with admin / "password". The role replaces it with
+# artifactory_oss_admin_password (vault) right after the first start.
+artifactory_oss_admin_user: admin
+artifactory_oss_default_admin_password: password
+
+# Required secrets (vault): artifactory_oss_db_password, artifactory_oss_admin_password.
+
+# firewalld zones in which the web port is opened (cluster nodes: the cluster zone).
+artifactory_oss_firewall_zones:
+  - public
+
+artifactory_oss_units:
+  - artifactory-postgres
+  - artifactory

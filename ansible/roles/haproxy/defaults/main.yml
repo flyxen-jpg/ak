@@ -1,0 +1,45 @@
+---
+# HAProxy runs on every application node (identical config); keepalived moves the VIP between
+# them. It is the single entry point for clients and also gives Artifact Keeper stable local
+# endpoints for PostgreSQL (current primary only), S3 and OpenSearch.
+haproxy_packages:
+  - haproxy
+  - socat
+
+# Backend groups.
+haproxy_app_group: ak_app
+haproxy_storage_group: ak_cluster
+
+# Listener ports.
+haproxy_http_port: 80
+haproxy_postgres_port: 5000
+haproxy_s3_port: 3910
+haproxy_opensearch_port: 9201
+haproxy_stats_port: 8404
+
+# Upstream ports.
+haproxy_ak_backend_port: 8080
+haproxy_ak_web_port: 3000
+haproxy_pg_port: 5432
+haproxy_patroni_rest_port: 8008
+haproxy_s3_upstream_port: 3900
+haproxy_s3_health_port: 3903
+haproxy_opensearch_upstream_port: 9200
+
+# Long timeouts: large artifact uploads/downloads must not be cut off.
+haproxy_timeout_client: 15m
+haproxy_timeout_server: 15m
+
+# Path prefixes served by the Artifact Keeper backend; everything else goes to the web UI.
+# Mirrors the upstream Caddyfile.
+haproxy_backend_paths:
+  - /api/ /v2 /health /healthz /livez /readyz /ready /metrics /swagger-ui
+  - /general/ /maven/ /npm/ /pypi/ /nuget/ /cargo/ /gems/ /go/ /helm/
+  - /debian/ /rpm/ /alpine/ /pacman/ /composer/ /conan/ /conda/ /t/ /swift/
+  - /terraform/ /cocoapods/ /hex/ /pub/ /lfs/ /ivy/ /chef/ /puppet/ /ansible/
+  - /cran/ /bazel/ /huggingface/ /jetbrains/ /vscode/ /proto/ /incus/ /lxc/ /ext/
+
+haproxy_admin_socket: /var/lib/haproxy/stats
+haproxy_firewall_zone: "{{ ak_firewall_zone }}"
+# Zone that faces the clients; the HTTP port is opened there as well.
+haproxy_public_zone: public

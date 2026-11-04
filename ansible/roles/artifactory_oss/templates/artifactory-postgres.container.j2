@@ -1,0 +1,23 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+[Unit]
+Description=PostgreSQL for Artifactory
+
+[Container]
+ContainerName=artifactory-postgres
+Image={{ artifactory_oss_postgres_image }}
+Pull=never
+Network=artifactory.network
+EnvironmentFile={{ artifactory_oss_config_dir }}/postgres.env
+Volume=artifactory-postgres-data:/var/lib/postgresql/data
+Ulimit=nofile=32000:40000
+HealthCmd=["pg_isready","-U","artifactory","-d","artifactory"]
+HealthInterval=10s
+HealthRetries=10
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,46 @@
+---
+# Artifact Keeper on a single host: PostgreSQL, OpenSearch, backend, web UI and Caddy as
+# reverse proxy, each a rootless Podman Quadlet unit in a private container network.
+# Mirrors the upstream docker-compose.yml without the optional scanners (Trivy, OpenSCAP,
+# Dependency-Track), which need several GB of extra memory and are not needed to evaluate.
+ak_standalone_version: 1.11.11
+# The web UI is versioned separately; 1.11.2 matches backend 1.11.11.
+ak_standalone_web_version: 1.11.2
+ak_standalone_backend_image: "ghcr.io/artifact-keeper/artifact-keeper-backend:{{ ak_standalone_version }}"
+ak_standalone_web_image: "ghcr.io/artifact-keeper/artifact-keeper-web:{{ ak_standalone_web_version }}"
+ak_standalone_postgres_image: docker.io/library/postgres:18.6-alpine
+ak_standalone_opensearch_image: docker.io/opensearchproject/opensearch:2.19.6
+ak_standalone_caddy_image: docker.io/library/caddy:2.11.7-alpine
+
+# Host port of the web interface and all package endpoints (Caddy).
+ak_standalone_http_port: 30080
+ak_standalone_external_url: "http://localhost:{{ ak_standalone_http_port }}"
+
+# Private container network. Only Caddy publishes a port; database and search stay internal.
+ak_standalone_network: artifact-keeper
+ak_standalone_subnet: 10.89.40.0/24
+# Additional container networks the backend joins, e.g. the network of a migration source.
+ak_standalone_extra_networks: []
+# Private addresses the backend may connect to (SSRF protection), e.g. a migration source.
+ak_standalone_ssrf_allow_private_cidrs: ""
+
+ak_standalone_config_dir: /etc/artifact-keeper
+ak_standalone_db_user: registry
+ak_standalone_db_name: artifact_registry
+ak_standalone_opensearch_heap: 512m
+ak_standalone_log_level: info
+# Additional environment variables (dict) for the backend.
+ak_standalone_extra_env: {}
+
+# Required secrets (vault): ak_standalone_db_password, ak_standalone_admin_password,
+# ak_standalone_jwt_secret (32+ chars) and ak_standalone_webhook_secret_key,
+# ak_standalone_migration_encryption_key, ak_standalone_sso_encryption_key
+# (each Base64 of exactly 32 bytes: openssl rand -base64 32).
+
+# Units in start order; the handler restarts them in this order as well.
+ak_standalone_units:
+  - ak-postgres
+  - ak-opensearch
+  - ak-backend
+  - ak-web
+  - ak-caddy

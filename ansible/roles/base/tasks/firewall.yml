@@ -1,0 +1,44 @@
+---
+# A dedicated zone bound to the cluster network keeps internal ports (etcd, PostgreSQL, S3 ...)
+# unreachable from other networks. Component roles only add their ports to this zone.
+
+- name: Enable firewalld
+  become: true
+  ansible.builtin.systemd_service:
+    name: firewalld
+    state: started
+    enabled: true
+
+- name: Create cluster firewall zone
+  become: true
+  ansible.posix.firewalld:
+    zone: "{{ base_firewall_zone }}"
+    state: present
+    permanent: true
+  notify: Reload firewalld
+
+# A new zone only becomes usable at runtime after a reload, so the handler runs right away.
+- name: Activate a newly created zone
+  ansible.builtin.meta: flush_handlers
+
+# Must happen before the network is bound to the zone, otherwise the running SSH session
+# of Ansible is cut off.
+- name: Allow essential services in the cluster zone
+  become: true
+  ansible.posix.firewalld:
+    zone: "{{ base_firewall_zone }}"
+    service: "{{ item }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ base_firewall_services }}"
+
+- name: Bind cluster network to the cluster zone
+  become: true
+  ansible.posix.firewalld:
+    zone: "{{ base_firewall_zone }}"
+    source: "{{ item }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ base_firewall_sources }}"

@@ -1,0 +1,85 @@
+---
+- name: Verify that all shared secrets are defined
+  ansible.builtin.assert:
+    that:
+      - artifact_keeper_admin_password | length >= 12
+      - artifact_keeper_jwt_secret | length >= 32
+      - artifact_keeper_webhook_secret_key | length > 0
+      - artifact_keeper_migration_encryption_key | length > 0
+      - artifact_keeper_sso_encryption_key | length > 0
+    fail_msg: Artifact Keeper secrets are missing (see roles/artifact_keeper/defaults/main.yml).
+    quiet: true
+
+- name: Open Artifact Keeper ports in the cluster zone
+  become: true
+  ansible.posix.firewalld:
+    zone: "{{ artifact_keeper_firewall_zone }}"
+    port: "{{ item }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - "{{ artifact_keeper_backend_port }}"
+    - "{{ artifact_keeper_web_port }}"
+
+- name: Import image tasks
+  ansible.builtin.import_tasks: images.yml
+
+- name: Create configuration directory
+  become: true
+  ansible.builtin.file:
+    path: "{{ artifact_keeper_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ podman_user }}"
+    mode: "0750"
+
+# Read by Podman (as the service account) when the container starts; never baked into images.
+- name: Write backend environment file
+  become: true
+  ansible.builtin.template:
+    src: backend.env.j2
+    dest: "{{ artifact_keeper_config_dir }}/backend.env"
+    owner: root
+    group: "{{ podman_user }}"
+    mode: "0640"
+  notify: Restart artifact keeper
+
+- name: Install Quadlet units
+  become: true
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ podman_quadlet_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - ak-backend.container
+    - ak-web.container
+  notify: Restart artifact keeper
+
+- name: Apply pending Artifact Keeper restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Start Artifact Keeper
+  become: true
+  become_user: "{{ podman_user }}"
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    scope: user
+    state: started
+    daemon_reload: true
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ podman_user_uid }}"
+  loop:
+    - ak-backend.service
+    - ak-web.service
+
+# The first start also runs the database migrations; give it time.
+- name: Wait until the backend is ready
+  ansible.builtin.uri:
+    url: "http://{{ artifact_keeper_listen_ip }}:{{ artifact_keeper_backend_port }}/readyz"
+  register: artifact_keeper_ready
+  until: artifact_keeper_ready.status == 200
+  retries: 60
+  delay: 5

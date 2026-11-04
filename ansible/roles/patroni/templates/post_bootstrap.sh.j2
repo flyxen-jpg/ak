@@ -1,0 +1,11 @@
+#!/bin/bash
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+#
+# Run by Patroni exactly once, on the node that initialises the cluster.
+# $1 = connection string of the new primary.
+set -euo pipefail
+psql "$1" -v ON_ERROR_STOP=1 <<'SQL'
+CREATE ROLE {{ patroni_app_user }} LOGIN PASSWORD '{{ patroni_app_password }}';
+CREATE DATABASE {{ patroni_app_database }} OWNER {{ patroni_app_user }};
+SQL

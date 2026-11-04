@@ -1,0 +1,31 @@
+---
+# Environment settings TEMPLATE: air-gapped data centre (no internet, no VirtualBox).
+
+ak_offline: true
+ak_bundle_dir: /srv/ak-bundle
+
+# Dedicated cluster/service network. The interface carrying ak_cluster_ip is detected
+# automatically, so differing NIC names (ens192, eno1, bond0 ...) need no configuration.
+ak_cluster_network: 10.20.30.0/24
+ak_cluster_ip: "{{ ansible_host }}"
+# Must be a free address in ak_cluster_network. On VMware enable "MAC address changes" and
+# "Forged transmits" (or use a dedicated port group); most public clouds block VRRP entirely.
+ak_vip: 10.20.30.10
+ak_domain: example.internal
+# Put a TLS-terminating name here once HAProxy is configured with certificates.
+ak_external_url: "http://artifacts.example.internal"
+ak_firewall_zone: ak-cluster
+
+# Internal time source. etcd and Patroni rely on consistent clocks; public pools are unreachable.
+base_chrony_servers:
+  - ntp1.example.internal
+  - ntp2.example.internal
+
+# Internal DNS usually resolves the node names; the /etc/hosts block can then be switched off.
+base_manage_etc_hosts: true
+
+# Size of the Garage data volume advertised per node (used for data placement only).
+garage_capacity: 200G
+
+# Larger heap for production search workloads (container memory grows accordingly).
+opensearch_heap_size: 1g

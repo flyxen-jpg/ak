@@ -1,0 +1,128 @@
+---
+# Groups, users and permission targets through the UI API (the REST equivalents are Pro only).
+# Field names follow the UI: "groupName" for groups, membership via PUT with "usersInGroup".
+
+- name: Read existing groups, users and permissions
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_rt_url }}/ui/api/v1/access/api/ui/{{ item }}"
+    headers: "{{ artifactory_migration_rt_ui }}"
+  loop:
+    - groups
+    - users
+    - permissions
+  register: artifactory_migration_rt_security
+  # The UI API of Artifactory occasionally stalls on single requests; retry instead of waiting long.
+  until: artifactory_migration_rt_security.status | default(0) == 200
+  retries: 4
+  delay: 5
+
+- name: Remember existing names
+  ansible.builtin.set_fact:
+    artifactory_migration_rt_groups: "{{ artifactory_migration_rt_security.results[0].json.groups | map(attribute='name') | list }}"
+    artifactory_migration_rt_users: "{{ artifactory_migration_rt_security.results[1].json.users | map(attribute='username') | list }}"
+    artifactory_migration_rt_permissions: "{{ artifactory_migration_rt_security.results[2].json.permissions | map(attribute='name') | list }}"
+
+- name: Create groups
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_rt_url }}/ui/api/v1/access/api/ui/groups"
+    method: POST
+    headers: "{{ artifactory_migration_rt_ui }}"
+    body_format: json
+    body:
+      groupName: "{{ item.name }}"
+      description: "{{ item.description }}"
+      autoJoin: false
+      adminPrivileges: false
+    # 409: already exists (also after a request that stalled but was processed).
+    status_code: [200, 201, 409]
+  loop: "{{ artifactory_migration_seed_groups }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.name not in artifactory_migration_rt_groups
+  register: artifactory_migration_create
+  until: artifactory_migration_create.status | default(0) in [200, 201, 409]
+  retries: 4
+  delay: 5
+  changed_when: artifactory_migration_create.status in [200, 201]
+
+# Test users with a known password pattern (test data, never use in production).
+- name: Create users
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_rt_url }}/ui/api/v1/access/api/ui/users"
+    method: POST
+    headers: "{{ artifactory_migration_rt_ui }}"
+    body_format: json
+    body:
+      username: "{{ item.name }}"
+      email: "{{ item.name }}@lab.local"
+      password: "Lab-Passw0rd-{{ item.name }}!"
+      admin: false
+      profileUpdatable: true
+      disableUiAccess: false
+      internalPasswordDisabled: false
+    # 409: already exists (also after a request that stalled but was processed).
+    status_code: [200, 201, 409]
+  loop: "{{ artifactory_migration_seed_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.name not in artifactory_migration_rt_users
+  register: artifactory_migration_create
+  until: artifactory_migration_create.status | default(0) in [200, 201, 409]
+  retries: 4
+  delay: 5
+  changed_when: artifactory_migration_create.status in [200, 201]
+  no_log: true
+
+- name: Read group memberships
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_rt_url }}/ui/api/v1/access/api/ui/groups/{{ item.name }}"
+    headers: "{{ artifactory_migration_rt_ui }}"
+  loop: "{{ artifactory_migration_seed_groups }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: artifactory_migration_rt_group_details
+  # The UI API of Artifactory occasionally stalls on single requests; retry instead of waiting long.
+  until: artifactory_migration_rt_group_details.status | default(0) == 200
+  retries: 4
+  delay: 5
+
+- name: Set group memberships
+  vars:
+    artifactory_migration_wanted: >-
+      {{ artifactory_migration_seed_users | selectattr('group', 'equalto', item.item.name) | map(attribute='name') | sort }}
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_rt_url }}/ui/api/v1/access/api/ui/groups/{{ item.item.name }}"
+    method: PUT
+    headers: "{{ artifactory_migration_rt_ui }}"
+    body_format: json
+    body:
+      groupName: "{{ item.item.name }}"
+      description: "{{ item.item.description }}"
+      autoJoin: false
+      adminPrivileges: false
+      usersInGroup: "{{ artifactory_migration_wanted }}"
+    status_code: [200, 204]
+  loop: "{{ artifactory_migration_rt_group_details.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: (item.json.usersInGroup | default([]) | sort) != artifactory_migration_wanted
+  changed_when: true
+
+- name: Create permission targets
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_rt_url }}/ui/api/v1/access/api/ui/permissions"
+    method: POST
+    headers: "{{ artifactory_migration_rt_ui }}"
+    body_format: json
+    body: "{{ item }}"
+    # 409: already exists (also after a request that stalled but was processed).
+    status_code: [200, 201, 409]
+  loop: "{{ artifactory_migration_seed_permissions }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.name not in artifactory_migration_rt_permissions
+  register: artifactory_migration_create
+  until: artifactory_migration_create.status | default(0) in [200, 201, 409]
+  retries: 4
+  delay: 5
+  changed_when: artifactory_migration_create.status in [200, 201]

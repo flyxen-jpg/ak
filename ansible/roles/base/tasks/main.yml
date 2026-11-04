@@ -1,0 +1,72 @@
+---
+# Common operating system baseline for all cluster nodes.
+
+- name: Verify that the target runs a supported operating system
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] == 'RedHat'
+      - ansible_facts['distribution_major_version'] == '10'
+    fail_msg: "Only Rocky Linux / RHEL 10 is supported, found {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
+    quiet: true
+
+- name: Import network fact tasks
+  ansible.builtin.import_tasks: network_facts.yml
+
+- name: Install base packages
+  become: true
+  ansible.builtin.dnf:
+    name: "{{ base_packages }}"
+    state: present
+
+- name: Apply kernel parameters
+  become: true
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/90-artifact-keeper.conf
+    state: present
+  loop: "{{ base_sysctl | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"
+
+- name: Configure time servers
+  become: true
+  ansible.builtin.template:
+    src: chrony.conf.j2
+    dest: /etc/chrony.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: base_chrony_servers | length > 0
+  notify: Restart chronyd
+
+- name: Enable time synchronisation
+  become: true
+  ansible.builtin.systemd_service:
+    name: chronyd
+    state: started
+    enabled: true
+
+- name: Add cluster nodes to /etc/hosts
+  become: true
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED: artifact keeper cluster"
+    block: |
+      {% for host in groups[base_hosts_group] %}
+      {{ hostvars[host]['ak_cluster_ip'] }} {{ host }}.{{ ak_domain }} {{ host }}
+      {% endfor %}
+      {{ ak_vip }} ak.{{ ak_domain }} ak
+  when: base_manage_etc_hosts
+
+- name: Import firewall tasks
+  ansible.builtin.import_tasks: firewall.yml
+
+- name: Install cluster status script
+  become: true
+  ansible.builtin.template:
+    src: ak-cluster-status.sh.j2
+    dest: "{{ base_status_script }}"
+    owner: root
+    group: root
+    mode: "0755"

@@ -1,0 +1,20 @@
+---
+# OpenSearch powers the Artifact Keeper search. Three nodes; every index gets one replica so
+# the loss of one node turns the cluster yellow instead of red.
+opensearch_image: docker.io/opensearchproject/opensearch:2.19.6
+opensearch_group: ak_cluster
+opensearch_cluster_name: ak-search
+opensearch_node_name: "{{ inventory_hostname }}"
+opensearch_listen_ip: "{{ ak_cluster_ip }}"
+opensearch_http_port: 9200
+opensearch_transport_port: 9300
+# JVM heap (container memory is roughly heap + 300 MB).
+opensearch_heap_size: 256m
+opensearch_nofile_limit: 65536
+# Artifact Keeper creates its indices with 0 replicas (single-node default). This template
+# overrides that for the AK index names; set to 0 only for single-node installations.
+opensearch_ak_index_patterns:
+  - "artifacts*"
+  - "repositories*"
+opensearch_ak_index_replicas: 1
+opensearch_firewall_zone: "{{ ak_firewall_zone }}"

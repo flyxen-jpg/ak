@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+{% for server in base_chrony_servers %}
+server {{ server }} iburst
+{% endfor %}
+driftfile /var/lib/chrony/drift
+# Step the clock on start-up if it is far off (common after VM restore), slew afterwards.
+makestep 1.0 3
+rtcsync
+keyfile /etc/chrony.keys
+logdir /var/log/chrony

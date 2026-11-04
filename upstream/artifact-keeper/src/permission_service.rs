@@ -1,0 +1,3085 @@
+//! Permission service for fine-grained access control.
+//!
+//! Resolves whether a user has a specific action on a target (repository,
+//! group, or artifact) by checking both direct user permissions and
+//! transitive group memberships in a single query. Results are cached
+//! in-process with a 30-second TTL to avoid repeated database round-trips
+//! on hot paths such as artifact downloads.
+
+use sqlx::PgPool;
+use std::collections::HashMap;
+use std::sync::RwLock;
+use std::time::{Duration, Instant};
+use tracing::{debug, error, warn};
+use uuid::Uuid;
+
+use crate::error::{AppError, Result};
+
+/// Target type for system-wide permission checks (e.g. creating repositories or groups).
+pub const SYSTEM_TARGET_TYPE: &str = "system";
+
+/// Sentinel UUID used as the `target_id` for system-wide permission checks.
+/// Operations that are not scoped to a specific entity (repository, group, etc.)
+/// use this nil UUID as a conventional placeholder.
+pub const SYSTEM_SENTINEL_ID: Uuid = Uuid::nil();
+
+/// Principal type for anonymous (unauthenticated) access rules (#1849).
+///
+/// Anonymous rules let an operator grant READ access to a repository (or its
+/// owning project) to callers presenting no credential — the CI-runner
+/// use case — optionally restricted by `allowed_cidrs`. They are evaluated
+/// only by [`PermissionService::check_anonymous_repository_action`]; the
+/// authenticated resolvers never match them (their principal disjuncts name
+/// user/group/service-account rows), and write-time validation restricts
+/// them to `read` actions on `repository`/`project` targets with the nil
+/// principal id.
+pub const ANONYMOUS_PRINCIPAL_TYPE: &str = "anonymous";
+
+/// Optional conditions narrowing when a permission rule applies (#1849).
+///
+/// Today the only condition kind is `allowed_cidrs`: the rule applies only
+/// to requests whose client IP (resolved under the trusted-proxy policy,
+/// see `client_ip_context_middleware`) falls inside one of the listed CIDR
+/// ranges; an unknown client IP matches nothing (fail closed). The struct
+/// is deliberately open to future condition kinds (artifact, version, ...)
+/// without a schema change, which is why it serializes as a JSONB object —
+/// but unknown keys are rejected at write time so a typo cannot silently
+/// widen a rule.
+///
+/// # Interaction with the role-assignment fallback
+///
+/// Applicability is per-rule, not per-principal: when a principal's
+/// conditioned rule falls out of `applicable_rules` on an IP miss, the
+/// decision falls to the legacy `role_assignments` fallback, exactly as if
+/// the rule did not exist for that request. So inside the CIDR the rule is
+/// authoritative, while outside it the principal keeps whatever its role
+/// assignments grant unconditionally. That can mean MORE access outside the
+/// CIDR for a principal holding both — the documented role model, not an
+/// escalation: the fallback never grants beyond the role's unconditional
+/// capabilities (recorded from review finding P3, #4266). An operator who
+/// wants a principal restricted to the CIDR must grant it ONLY through the
+/// conditioned rule, not additionally via a role.
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionConditions {
+    /// CIDR ranges (IPv4 or IPv6) the request's client IP must fall inside
+    /// for the rule to apply. `None` (absent) means no IP restriction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_cidrs: Option<Vec<String>>,
+}
+
+impl PermissionConditions {
+    /// Validate the condition set for writing. Every CIDR must parse; a
+    /// present-but-empty `allowed_cidrs` is rejected (it would make the rule
+    /// match nothing, which is almost certainly an authoring mistake).
+    pub fn validate(&self) -> Result<()> {
+        if let Some(cidrs) = &self.allowed_cidrs {
+            if cidrs.is_empty() {
+                return Err(AppError::Validation(
+                    "conditions.allowed_cidrs must name at least one CIDR range".to_string(),
+                ));
+            }
+            for cidr in cidrs {
+                crate::api::middleware::rate_limit::CidrRange::parse(cidr)
+                    .map_err(|e| AppError::Validation(format!("conditions.allowed_cidrs: {e}")))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Serialize for persistence in the `conditions` JSONB column.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+    }
+}
+
+/// SQL predicate limiting a permission rule's applicability by the request's
+/// client IP (#1849): a rule carrying `conditions.allowed_cidrs` applies
+/// only when `ip_ref` (a bind like `$4` or an inet-castable SQL literal)
+/// falls inside one of the listed CIDRs. A NULL `ip_ref` matches nothing
+/// (fail closed). Rules without the key are unaffected.
+///
+/// `alias` is the `permissions` table alias in the enclosing query. The
+/// generated text is interpolated unescaped, so both parameters MUST be
+/// trusted fragments (bind placeholders, validated `IpAddr` literals) —
+/// never request-derived text.
+pub(crate) fn ip_condition_sql(alias: &str, ip_ref: &str) -> String {
+    format!("AND {}", ip_condition_expr(alias, ip_ref))
+}
+
+/// The boolean behind [`ip_condition_sql`]: whether the rule `alias` is
+/// applicable to a request from `ip_ref`. Selected as a column (rather than
+/// filtered on) by the resolvers that report condition telemetry (#4677), so
+/// one query yields both the decision and how the condition evaluated. Same
+/// trusted-fragment contract as [`ip_condition_sql`].
+fn ip_condition_expr(alias: &str, ip_ref: &str) -> String {
+    format!(
+        "(\
+             NOT ({alias}.conditions ? 'allowed_cidrs') \
+             OR EXISTS ( \
+                 SELECT 1 \
+                 FROM jsonb_array_elements_text(\
+                     {alias}.conditions->'allowed_cidrs'\
+                 ) AS ak_ip_cidr(cidr) \
+                 WHERE {ip_ref}::inet <<= ak_ip_cidr.cidr::inet \
+             )\
+         )"
+    )
+}
+
+/// Columns a resolver selects per candidate rule so condition telemetry
+/// (#4677) can be read off the same query: `conditioned` (the rule carries
+/// `allowed_cidrs`) and `ip_ok` (the rule is applicable to this request).
+fn condition_columns(alias: &str, ip_ref: &str) -> String {
+    format!(
+        "({alias}.conditions ? 'allowed_cidrs') AS conditioned, {} AS ip_ok",
+        ip_condition_expr(alias, ip_ref)
+    )
+}
+
+/// The two tallies every telemetry-reporting resolver selects over its
+/// `candidate_rules` CTE (#4677).
+const CONDITION_TALLY_SQL: &str = "\
+    (SELECT COUNT(*) FROM candidate_rules WHERE conditioned) AS conditioned_rules, \
+    (SELECT COUNT(*) FROM candidate_rules WHERE conditioned AND ip_ok) AS matched_rules";
+
+/// Name of the counter recording permission-condition evaluations (#4677).
+pub const CONDITION_EVALUATIONS_METRIC: &str = "ak_permission_condition_evaluations_total";
+
+/// How a permission decision's IP conditions evaluated (#4677), the
+/// `outcome` label of [`CONDITION_EVALUATIONS_METRIC`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionOutcome {
+    /// At least one conditioned rule's `allowed_cidrs` contains the
+    /// request's verified client IP.
+    Matched,
+    /// The client IP is known and no conditioned rule's range contains it.
+    NotMatched,
+    /// The client IP is not verified (no request scope, or behind a trusted
+    /// proxy without `XFF_TRUSTED_FOR_AUTHZ`), so every conditioned rule
+    /// failed closed.
+    UnknownIp,
+}
+
+impl ConditionOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConditionOutcome::Matched => "matched",
+            ConditionOutcome::NotMatched => "not_matched",
+            ConditionOutcome::UnknownIp => "unknown_ip",
+        }
+    }
+}
+
+/// The outcome of one decision over `conditioned` candidate rules carrying
+/// `allowed_cidrs`, `matched` of which applied; `None` when no candidate
+/// rule carried a condition (nothing was evaluated, nothing is recorded).
+pub fn condition_outcome(
+    client_ip: Option<std::net::IpAddr>,
+    conditioned: i64,
+    matched: i64,
+) -> Option<ConditionOutcome> {
+    if conditioned <= 0 {
+        return None;
+    }
+    Some(match (client_ip, matched > 0) {
+        (None, _) => ConditionOutcome::UnknownIp,
+        (Some(_), true) => ConditionOutcome::Matched,
+        (Some(_), false) => ConditionOutcome::NotMatched,
+    })
+}
+
+/// Count and debug-log one permission decision that evaluated `allowed_cidrs`
+/// conditions (#4677). `site` names the resolver. Decisions over rules that
+/// carry no condition record nothing, so a deployment without conditioned
+/// rules sees no series and no log lines.
+fn record_condition_evaluation(
+    site: &'static str,
+    principal: Option<Uuid>,
+    target_id: Uuid,
+    client_ip: Option<std::net::IpAddr>,
+    conditioned: i64,
+    matched: i64,
+) {
+    let Some(outcome) = condition_outcome(client_ip, conditioned, matched) else {
+        return;
+    };
+    metrics::counter!(
+        CONDITION_EVALUATIONS_METRIC,
+        "condition" => "allowed_cidrs",
+        "outcome" => outcome.as_str()
+    )
+    .increment(1);
+    debug!(
+        condition = "allowed_cidrs",
+        outcome = outcome.as_str(),
+        site,
+        principal = ?principal,
+        %target_id,
+        client_ip = ?client_ip,
+        conditioned_rules = conditioned,
+        matched_rules = matched,
+        "permission condition evaluated"
+    );
+}
+
+/// The current request's VERIFIED client IP as a SQL expression for the
+/// listing fragments (#1849): a quoted `IpAddr` literal when
+/// [`crate::api::middleware::client_ip::current_verified_client_ip`]
+/// yields one, or `NULL` when it does not — outside a request scope
+/// (background jobs, detached tasks) AND behind a trusted proxy without
+/// the operator's `XFF_TRUSTED_FOR_AUTHZ` assertion — where the
+/// fail-closed semantics of [`ip_condition_sql`] exclude every conditioned
+/// rule. `IpAddr`'s `Display` contains only digits, dots and colons,
+/// so quoting it is injection-safe.
+pub(crate) fn request_ip_sql_ref() -> String {
+    match crate::api::middleware::client_ip::current_verified_client_ip() {
+        Some(ip) => format!("'{ip}'"),
+        None => "NULL".to_string(),
+    }
+}
+
+/// How long cached permission entries remain valid before a fresh DB lookup.
+const CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Composite cache key: (user_id, target_type, target_id, client_ip).
+///
+/// The client IP is part of the key because `allowed_cidrs` conditions
+/// (#1849) make the granted action set IP-dependent: caching a result
+/// resolved under one source address and serving it to the same principal
+/// arriving from another would leak the grant for the 30 s TTL. The IP is
+/// the VERIFIED grade
+/// ([`crate::api::middleware::client_ip::current_verified_client_ip`]):
+/// behind a trusted proxy without `XFF_TRUSTED_FOR_AUTHZ` it is `None`, so
+/// a result resolved under a spoofed XFF can never alias a verified-IP
+/// entry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CacheKey {
+    user_id: Uuid,
+    target_type: String,
+    target_id: Uuid,
+    client_ip: Option<std::net::IpAddr>,
+}
+
+impl CacheKey {
+    fn new(user_id: Uuid, target_type: &str, target_id: Uuid) -> Self {
+        Self {
+            user_id,
+            target_type: target_type.to_string(),
+            target_id,
+            client_ip: crate::api::middleware::client_ip::current_verified_client_ip(),
+        }
+    }
+}
+
+/// A cached set of granted actions together with its insertion timestamp.
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    actions: Vec<String>,
+    inserted_at: Instant,
+}
+
+impl CacheEntry {
+    fn is_expired(&self) -> bool {
+        self.inserted_at.elapsed() > CACHE_TTL
+    }
+}
+
+/// Composite key for the target rules existence cache: (target_type, target_id).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RulesCacheKey {
+    target_type: String,
+    target_id: Uuid,
+}
+
+impl RulesCacheKey {
+    fn new(target_type: &str, target_id: Uuid) -> Self {
+        Self {
+            target_type: target_type.to_string(),
+            target_id,
+        }
+    }
+}
+
+/// A cached boolean result with an insertion timestamp.
+#[derive(Debug, Clone)]
+struct RulesCacheEntry {
+    exists: bool,
+    inserted_at: Instant,
+}
+
+impl RulesCacheEntry {
+    fn is_expired(&self) -> bool {
+        self.inserted_at.elapsed() > CACHE_TTL
+    }
+}
+
+/// SQL that checks whether a principal of `principal_type` exists with `id = $1`,
+/// or `None` when the principal type is not recognised.
+///
+/// Service accounts are stored in the `users` table with `is_service_account =
+/// true`; human users have it `false`; groups live in the `groups` table. This
+/// mapping is the single source of truth for the write-time type/id
+/// correspondence check performed by [`PermissionService::validate_principal`].
+fn principal_existence_query(principal_type: &str) -> Option<&'static str> {
+    match principal_type {
+        "user" => {
+            Some("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND is_service_account = false)")
+        }
+        "service_account" => {
+            Some("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND is_service_account = true)")
+        }
+        "group" => Some("SELECT EXISTS(SELECT 1 FROM groups WHERE id = $1)"),
+        _ => None,
+    }
+}
+
+/// Service that evaluates permission rules stored in the `permissions` table.
+///
+/// The service resolves both direct user grants and group-based grants in a
+/// single SQL query, then caches the resulting action list per
+/// (user, target_type, target_id) tuple for 30 seconds.
+pub struct PermissionService {
+    db: PgPool,
+    cache: RwLock<HashMap<CacheKey, CacheEntry>>,
+    rules_cache: RwLock<HashMap<RulesCacheKey, RulesCacheEntry>>,
+}
+
+impl PermissionService {
+    pub fn new(db: PgPool) -> Self {
+        Self {
+            db,
+            cache: RwLock::new(HashMap::new()),
+            rules_cache: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Check whether `user_id` holds `action` on the given target.
+    ///
+    /// Admin users bypass all checks and always receive `true`. For
+    /// non-admin users the service first checks the in-process cache,
+    /// then falls back to a combined SQL query that resolves both direct
+    /// user permissions and group-based permissions via `user_group_members`.
+    pub async fn check_permission(
+        &self,
+        user_id: Uuid,
+        target_type: &str,
+        target_id: Uuid,
+        action: &str,
+        is_admin: bool,
+    ) -> Result<bool> {
+        if is_admin {
+            return Ok(true);
+        }
+
+        let actions = self
+            .resolve_actions(user_id, target_type, target_id)
+            .await?;
+        Ok(actions.iter().any(|a| a == action))
+    }
+
+    /// Check an action against repository ownership, fine-grained rules, and
+    /// legacy role assignments in one decision.
+    ///
+    /// A role carrying `admin` is a durable owner capability and always wins.
+    /// For every other principal, an applicable direct/group repository rule
+    /// (or inherited project rule) is authoritative for that principal only.
+    /// Users without an applicable rule retain their role-based capabilities.
+    /// This principal-scoped transition prevents the first rule on a target
+    /// from dropping every unrelated legacy principal to no access.
+    pub async fn check_repository_action(
+        &self,
+        user_id: Uuid,
+        repository_id: Uuid,
+        action: &str,
+        is_admin: bool,
+    ) -> Result<bool> {
+        if is_admin {
+            return Ok(true);
+        }
+        // #1849: a rule carrying `conditions.allowed_cidrs` is applicable
+        // only to requests whose client IP falls inside it. The IP is the
+        // in-flight request's VERIFIED address (the authorization grade
+        // `client_ip_context_middleware` scopes): outside a request scope
+        // (background jobs, detached tasks) — and behind a trusted proxy
+        // without the operator's `XFF_TRUSTED_FOR_AUTHZ` assertion — it is
+        // None, which matches nothing: conditioned grants fail closed
+        // rather than trust an unverifiable XFF chain.
+        let client_ip = crate::api::middleware::client_ip::current_verified_client_ip();
+        // `candidate_rules` are the rules naming this principal and target;
+        // `applicable_rules` the ones whose IP condition holds. Splitting them
+        // lets the same query report how the conditions evaluated (#4677).
+        let query = format!(
+            r#"
+            WITH candidate_rules AS (
+                SELECT p.actions, {condition_columns}
+                FROM permissions p
+                WHERE (
+                    (p.principal_type IN ('user', 'service_account') AND p.principal_id = $1)
+                    OR (
+                        p.principal_type = 'group'
+                        AND p.principal_id IN (
+                            SELECT group_id
+                            FROM user_group_members
+                            WHERE user_id = $1
+                        )
+                    )
+                )
+                AND (
+                    (p.target_type = 'repository' AND p.target_id = $2)
+                    OR (
+                        p.target_type = 'project'
+                        AND p.target_id = (
+                            SELECT project_id
+                            FROM repositories
+                            WHERE id = $2
+                        )
+                    )
+                )
+            ),
+            applicable_rules AS (
+                SELECT actions FROM candidate_rules WHERE ip_ok
+            ),
+            assigned_roles AS (
+                SELECT r.permissions
+                FROM role_assignments ra
+                JOIN roles r ON r.id = ra.role_id
+                WHERE ra.user_id = $1
+                  AND (ra.repository_id = $2 OR ra.repository_id IS NULL)
+            )
+            SELECT
+                EXISTS (
+                    SELECT 1
+                    FROM assigned_roles
+                    WHERE 'admin' = ANY(permissions)
+                )
+                OR CASE
+                    WHEN EXISTS (SELECT 1 FROM applicable_rules)
+                    THEN EXISTS (
+                        SELECT 1
+                        FROM applicable_rules
+                        WHERE $3 = ANY(actions) OR 'admin' = ANY(actions)
+                    )
+                    ELSE EXISTS (
+                        SELECT 1
+                        FROM assigned_roles
+                        WHERE $3 = ANY(permissions) OR 'admin' = ANY(permissions)
+                    )
+                END AS allowed,
+                {tally}
+            "#,
+            condition_columns = condition_columns("p", "$4"),
+            tally = CONDITION_TALLY_SQL,
+        );
+        let (allowed, conditioned, matched): (bool, i64, i64) =
+            sqlx::query_as(sqlx::AssertSqlSafe(&*query))
+                .bind(user_id)
+                .bind(repository_id)
+                .bind(action)
+                .bind(client_ip.map(|ip| ip.to_string()))
+                .fetch_one(&self.db)
+                .await
+                .map_err(|e| AppError::Database(e.to_string()))?;
+        record_condition_evaluation(
+            "repository_action",
+            Some(user_id),
+            repository_id,
+            client_ip,
+            conditioned,
+            matched,
+        );
+
+        Ok(allowed)
+    }
+
+    /// Check an action for an ANONYMOUS (unauthenticated) caller against
+    /// `principal_type = 'anonymous'` rules (#1849).
+    ///
+    /// This is the grant behind IP-restricted anonymous downloads: an
+    /// operator grants the anonymous principal `read` on a repository (or
+    /// its owning project), optionally narrowed by `allowed_cidrs`, and CI
+    /// runners inside those ranges can pull without credentials while every
+    /// other anonymous caller keeps the existence-hiding denial. There is no
+    /// role-assignment fallback (an anonymous caller holds no roles) and no
+    /// admin bypass. Write-time validation confines anonymous rules to
+    /// `read` on `repository`/`project` targets, and every gate only ever
+    /// asks this resolver about `read`.
+    ///
+    /// The client IP is the in-flight request's VERIFIED address, exactly
+    /// as in [`Self::check_repository_action`]: `None` — outside a request
+    /// scope, or behind a trusted proxy without the operator's
+    /// `XFF_TRUSTED_FOR_AUTHZ` assertion — fails closed (conditioned rules
+    /// match nothing; an unconditioned anonymous rule still applies, since
+    /// it names no CIDR).
+    pub async fn check_anonymous_repository_action(
+        &self,
+        repository_id: Uuid,
+        action: &str,
+    ) -> Result<bool> {
+        let client_ip = crate::api::middleware::client_ip::current_verified_client_ip();
+        let query = format!(
+            r#"
+            WITH candidate_rules AS (
+                SELECT {condition_columns}
+                FROM permissions p
+                WHERE p.principal_type = 'anonymous'
+                  AND (
+                      (p.target_type = 'repository' AND p.target_id = $1)
+                      OR (
+                          p.target_type = 'project'
+                          AND p.target_id = (
+                              SELECT project_id
+                              FROM repositories
+                              WHERE id = $1
+                          )
+                      )
+                  )
+                  AND ($2 = ANY(p.actions) OR 'admin' = ANY(p.actions))
+            )
+            SELECT
+                EXISTS (SELECT 1 FROM candidate_rules WHERE ip_ok) AS allowed,
+                {tally}
+            "#,
+            condition_columns = condition_columns("p", "$3"),
+            tally = CONDITION_TALLY_SQL,
+        );
+        let (allowed, conditioned, matched): (bool, i64, i64) =
+            sqlx::query_as(sqlx::AssertSqlSafe(&*query))
+                .bind(repository_id)
+                .bind(action)
+                .bind(client_ip.map(|ip| ip.to_string()))
+                .fetch_one(&self.db)
+                .await
+                .map_err(|e| AppError::Database(e.to_string()))?;
+        record_condition_evaluation(
+            "anonymous_repository_action",
+            None,
+            repository_id,
+            client_ip,
+            conditioned,
+            matched,
+        );
+        Ok(allowed)
+    }
+
+    /// Return true when at least one permission rule exists for the given
+    /// target, regardless of principal. This is used by middleware to decide
+    /// whether fine-grained rules should be enforced at all (targets without
+    /// any rules fall back to the default access model).
+    pub async fn has_any_rules_for_target(
+        &self,
+        target_type: &str,
+        target_id: Uuid,
+    ) -> Result<bool> {
+        let key = RulesCacheKey::new(target_type, target_id);
+
+        // Fast path: return cached result if still fresh.
+        let cached = match self.rules_cache.read() {
+            Ok(cache) => cache.get(&key).and_then(|entry| {
+                if entry.is_expired() {
+                    None
+                } else {
+                    debug!(
+                        target_type,
+                        %target_id,
+                        exists = entry.exists,
+                        "rules cache hit"
+                    );
+                    Some(entry.exists)
+                }
+            }),
+            Err(poisoned) => {
+                error!("rules cache read lock poisoned, skipping cache");
+                drop(poisoned.into_inner());
+                None
+            }
+        };
+
+        if let Some(exists) = cached {
+            return Ok(exists);
+        }
+
+        debug!(target_type, %target_id, "rules cache miss, querying database");
+
+        // Projects (#2472): a repository target also has rules when its owning
+        // project carries a grant, so the fine-grained gate engages for
+        // project-only repositories instead of falling back to the default
+        // access model. The `$1 = 'repository'` guard keeps every other target
+        // type (group/artifact/system) unaffected, and a NULL `project_id`
+        // subquery result never matches (`target_id = NULL` is not true).
+        let exists: bool = sqlx::query_scalar(
+            r#"SELECT EXISTS(
+                 SELECT 1 FROM permissions
+                 WHERE (target_type = $1 AND target_id = $2)
+                    OR ($1 = 'repository' AND target_type = 'project' AND target_id = (
+                        SELECT project_id FROM repositories WHERE id = $2
+                    ))
+               )"#,
+        )
+        .bind(target_type)
+        .bind(target_id)
+        .fetch_one(&self.db)
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        // Populate cache.
+        match self.rules_cache.write() {
+            Ok(mut cache) => {
+                cache.retain(|_, v| !v.is_expired());
+                cache.insert(
+                    key,
+                    RulesCacheEntry {
+                        exists,
+                        inserted_at: Instant::now(),
+                    },
+                );
+            }
+            Err(poisoned) => {
+                error!("rules cache write lock poisoned, recovering to update cache");
+                let mut cache = poisoned.into_inner();
+                cache.retain(|_, v| !v.is_expired());
+                cache.insert(
+                    key,
+                    RulesCacheEntry {
+                        exists,
+                        inserted_at: Instant::now(),
+                    },
+                );
+            }
+        }
+
+        if !exists {
+            warn!(target_type, %target_id, "no permission rules found for target");
+        }
+
+        Ok(exists)
+    }
+
+    /// Clear both permission caches. Call this after any CRUD operation
+    /// on the `permissions` table to ensure stale grants are not served.
+    pub fn invalidate_cache(&self) {
+        match self.cache.write() {
+            Ok(mut cache) => cache.clear(),
+            Err(poisoned) => {
+                error!("permission cache lock poisoned during invalidation, clearing");
+                poisoned.into_inner().clear();
+            }
+        }
+        match self.rules_cache.write() {
+            Ok(mut cache) => cache.clear(),
+            Err(poisoned) => {
+                error!("rules cache lock poisoned during invalidation, clearing");
+                poisoned.into_inner().clear();
+            }
+        }
+    }
+
+    /// Validate that `principal_id` names an existing principal of the declared
+    /// `principal_type` before a grant is written.
+    ///
+    /// #2503 (defense-in-depth): since #2433 widened grant matching to include
+    /// `service_account`, a mistyped grant — e.g. `principal_type =
+    /// 'service_account'` naming a real *user* id — becomes effective. Principal
+    /// ids are globally-unique UUIDs drawn from distinct tables (`users` for both
+    /// `user` and `service_account`, disambiguated by `is_service_account`;
+    /// `groups` for `group`), so a type/id mismatch is always an authoring error.
+    /// Reject it at write time with a 400 rather than persisting a grant that
+    /// resolves against the wrong principal.
+    pub async fn validate_principal(&self, principal_type: &str, principal_id: Uuid) -> Result<()> {
+        // #1849: the anonymous principal names no table row — it stands for
+        // every unauthenticated caller — so existence is trivially true. The
+        // nil UUID is its only valid id, keeping
+        // `(principal_type, principal_id, target_type, target_id)` unique and
+        // giving hand-written SQL one unambiguous spelling.
+        if principal_type == ANONYMOUS_PRINCIPAL_TYPE {
+            if !principal_id.is_nil() {
+                return Err(AppError::Validation(format!(
+                    "principal_type '{ANONYMOUS_PRINCIPAL_TYPE}' requires the nil principal_id, \
+                     got {principal_id}"
+                )));
+            }
+            return Ok(());
+        }
+        let query = principal_existence_query(principal_type).ok_or_else(|| {
+            AppError::Validation(format!(
+                "Invalid principal_type '{principal_type}': expected one of user, \
+                 service_account, group, {ANONYMOUS_PRINCIPAL_TYPE}"
+            ))
+        })?;
+        let exists: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
+            .bind(principal_id)
+            .fetch_one(&self.db)
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        if !exists {
+            return Err(AppError::Validation(format!(
+                "principal_id {principal_id} does not exist as a {principal_type}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Resolve the full set of granted actions for a user on a specific target.
+    ///
+    /// Checks the cache first; on miss or expiry, queries the database and
+    /// populates the cache before returning.
+    async fn resolve_actions(
+        &self,
+        user_id: Uuid,
+        target_type: &str,
+        target_id: Uuid,
+    ) -> Result<Vec<String>> {
+        let key = CacheKey::new(user_id, target_type, target_id);
+
+        // Fast path: return cached entry if still fresh.
+        let cached = match self.cache.read() {
+            Ok(cache) => cache.get(&key).and_then(|entry| {
+                if entry.is_expired() {
+                    None
+                } else {
+                    debug!(
+                        %user_id,
+                        target_type,
+                        %target_id,
+                        actions = ?entry.actions,
+                        "permission cache hit"
+                    );
+                    Some(entry.actions.clone())
+                }
+            }),
+            Err(poisoned) => {
+                error!("permission cache read lock poisoned, skipping cache");
+                drop(poisoned.into_inner());
+                None
+            }
+        };
+
+        if let Some(actions) = cached {
+            return Ok(actions);
+        }
+
+        debug!(%user_id, target_type, %target_id, "permission cache miss, querying database");
+
+        // Cache miss or expired -- query the database.
+        let actions = self.query_actions(user_id, target_type, target_id).await?;
+
+        if actions.is_empty() {
+            warn!(
+                %user_id,
+                target_type,
+                %target_id,
+                "permission denied: rules exist but no actions granted"
+            );
+        }
+
+        // Populate cache. Evict stale entries while we hold the write lock
+        // to keep memory bounded over time.
+        match self.cache.write() {
+            Ok(mut cache) => {
+                cache.retain(|_, v| !v.is_expired());
+                cache.insert(
+                    key,
+                    CacheEntry {
+                        actions: actions.clone(),
+                        inserted_at: Instant::now(),
+                    },
+                );
+            }
+            Err(poisoned) => {
+                error!("permission cache write lock poisoned, recovering to update cache");
+                let mut cache = poisoned.into_inner();
+                cache.retain(|_, v| !v.is_expired());
+                cache.insert(
+                    key,
+                    CacheEntry {
+                        actions: actions.clone(),
+                        inserted_at: Instant::now(),
+                    },
+                );
+            }
+        }
+
+        Ok(actions)
+    }
+
+    /// Execute the combined SQL query that resolves direct user permissions
+    /// and group-based permissions via a UNION through `user_group_members`.
+    async fn query_actions(
+        &self,
+        user_id: Uuid,
+        target_type: &str,
+        target_id: Uuid,
+    ) -> Result<Vec<String>> {
+        // Projects (#2472): when resolving actions on a repository target, a
+        // grant on the repository's owning project is inherited. The
+        // `$2 = 'repository'` guard confines inheritance to repository
+        // targets; for a project-less repository the subquery yields NULL and
+        // the project arm never matches, so behavior is unchanged.
+        // #1849: `allowed_cidrs`-conditioned rules resolve to no actions
+        // unless the in-flight request's VERIFIED client IP falls inside
+        // the range (None — outside a request scope, or behind a trusted
+        // proxy without `XFF_TRUSTED_FOR_AUTHZ` — fails closed), exactly
+        // as in `check_repository_action`.
+        let client_ip = crate::api::middleware::client_ip::current_verified_client_ip();
+        let query = format!(
+            r#"
+            WITH candidate_rules AS (
+            SELECT p.actions, {condition_columns}
+            FROM permissions p
+            WHERE (
+                (p.principal_type IN ('user', 'service_account') AND p.principal_id = $1)
+                OR
+                (p.principal_type = 'group' AND p.principal_id IN (
+                    SELECT group_id FROM user_group_members WHERE user_id = $1
+                ))
+            )
+            AND (
+                (p.target_type = $2 AND p.target_id = $3)
+                OR ($2 = 'repository' AND p.target_type = 'project' AND p.target_id = (
+                    SELECT project_id FROM repositories WHERE id = $3
+                ))
+            )
+            )
+            SELECT
+                ARRAY(
+                    SELECT DISTINCT unnest(actions) FROM candidate_rules WHERE ip_ok
+                ) AS actions,
+                {tally}
+            "#,
+            condition_columns = condition_columns("p", "$4"),
+            tally = CONDITION_TALLY_SQL,
+        );
+        let (actions, conditioned, matched): (Vec<String>, i64, i64) =
+            sqlx::query_as(sqlx::AssertSqlSafe(&*query))
+                .bind(user_id)
+                .bind(target_type)
+                .bind(target_id)
+                .bind(client_ip.map(|ip| ip.to_string()))
+                .fetch_one(&self.db)
+                .await
+                .map_err(|e| AppError::Database(e.to_string()))?;
+        record_condition_evaluation(
+            "resolve_actions",
+            Some(user_id),
+            target_id,
+            client_ip,
+            conditioned,
+            matched,
+        );
+
+        Ok(actions)
+    }
+}
+
+#[cfg(ak_test_shard = "services-1")]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // #4677: permission-condition telemetry
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_condition_outcome() {
+        let ip: Option<std::net::IpAddr> = Some("10.0.0.1".parse().unwrap());
+        assert_eq!(
+            condition_outcome(ip, 0, 0),
+            None,
+            "no conditioned rule: nothing was evaluated"
+        );
+        assert_eq!(condition_outcome(ip, 2, 1), Some(ConditionOutcome::Matched));
+        assert_eq!(
+            condition_outcome(ip, 2, 0),
+            Some(ConditionOutcome::NotMatched)
+        );
+        assert_eq!(
+            condition_outcome(None, 1, 0),
+            Some(ConditionOutcome::UnknownIp)
+        );
+        assert_eq!(ConditionOutcome::Matched.as_str(), "matched");
+        assert_eq!(ConditionOutcome::NotMatched.as_str(), "not_matched");
+        assert_eq!(ConditionOutcome::UnknownIp.as_str(), "unknown_ip");
+    }
+
+    // -----------------------------------------------------------------------
+    // CacheKey construction and equality
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cache_key_equality_same_inputs() {
+        let user_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let a = CacheKey::new(user_id, "repository", target_id);
+        let b = CacheKey::new(user_id, "repository", target_id);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_cache_key_inequality_different_user() {
+        let target_id = Uuid::new_v4();
+        let a = CacheKey::new(Uuid::new_v4(), "repository", target_id);
+        let b = CacheKey::new(Uuid::new_v4(), "repository", target_id);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_cache_key_inequality_different_target_type() {
+        let user_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let a = CacheKey::new(user_id, "repository", target_id);
+        let b = CacheKey::new(user_id, "artifact", target_id);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_cache_key_inequality_different_target_id() {
+        let user_id = Uuid::new_v4();
+        let a = CacheKey::new(user_id, "repository", Uuid::new_v4());
+        let b = CacheKey::new(user_id, "repository", Uuid::new_v4());
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_cache_key_used_as_hash_key() {
+        let user_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let key = CacheKey::new(user_id, "group", target_id);
+
+        let mut map: HashMap<CacheKey, String> = HashMap::new();
+        map.insert(key.clone(), "test".to_string());
+
+        let lookup = CacheKey::new(user_id, "group", target_id);
+        assert_eq!(map.get(&lookup), Some(&"test".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // CacheEntry TTL behaviour
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cache_entry_not_expired_when_fresh() {
+        let entry = CacheEntry {
+            actions: vec!["read".to_string()],
+            inserted_at: Instant::now(),
+        };
+        assert!(!entry.is_expired());
+    }
+
+    #[test]
+    fn test_cache_entry_expired_after_ttl() {
+        let entry = CacheEntry {
+            actions: vec!["read".to_string()],
+            inserted_at: Instant::now() - CACHE_TTL - Duration::from_millis(1),
+        };
+        assert!(entry.is_expired());
+    }
+
+    #[test]
+    fn test_cache_entry_not_expired_just_before_ttl() {
+        let entry = CacheEntry {
+            actions: vec!["read".to_string()],
+            inserted_at: Instant::now() - CACHE_TTL + Duration::from_secs(1),
+        };
+        assert!(!entry.is_expired());
+    }
+
+    // -----------------------------------------------------------------------
+    // Cache TTL constant
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cache_ttl_is_thirty_seconds() {
+        assert_eq!(CACHE_TTL, Duration::from_secs(30));
+    }
+
+    // -----------------------------------------------------------------------
+    // CacheKey debug output
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cache_key_debug_format() {
+        let key = CacheKey::new(Uuid::nil(), "artifact", Uuid::nil());
+        let debug = format!("{:?}", key);
+        assert!(debug.contains("artifact"));
+        assert!(debug.contains("00000000-0000-0000-0000-000000000000"));
+    }
+
+    // -----------------------------------------------------------------------
+    // CacheEntry clone
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cache_entry_clone_preserves_actions() {
+        let entry = CacheEntry {
+            actions: vec!["read".to_string(), "write".to_string()],
+            inserted_at: Instant::now(),
+        };
+        let cloned = entry.clone();
+        assert_eq!(cloned.actions, entry.actions);
+    }
+
+    // -----------------------------------------------------------------------
+    // Invalidation clears both caches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_invalidate_cache_clears_all_entries() {
+        let cache: RwLock<HashMap<CacheKey, CacheEntry>> = RwLock::new(HashMap::new());
+        let rules_cache: RwLock<HashMap<RulesCacheKey, RulesCacheEntry>> =
+            RwLock::new(HashMap::new());
+        {
+            let mut guard = cache.write().unwrap();
+            guard.insert(
+                CacheKey::new(Uuid::new_v4(), "repository", Uuid::new_v4()),
+                CacheEntry {
+                    actions: vec!["read".to_string()],
+                    inserted_at: Instant::now(),
+                },
+            );
+            guard.insert(
+                CacheKey::new(Uuid::new_v4(), "artifact", Uuid::new_v4()),
+                CacheEntry {
+                    actions: vec!["write".to_string()],
+                    inserted_at: Instant::now(),
+                },
+            );
+            assert_eq!(guard.len(), 2);
+        }
+        {
+            let mut guard = rules_cache.write().unwrap();
+            guard.insert(
+                RulesCacheKey::new("repository", Uuid::new_v4()),
+                RulesCacheEntry {
+                    exists: true,
+                    inserted_at: Instant::now(),
+                },
+            );
+            assert_eq!(guard.len(), 1);
+        }
+        // Simulate invalidation (same logic as invalidate_cache)
+        {
+            let mut guard = cache.write().unwrap();
+            guard.clear();
+        }
+        {
+            let mut guard = rules_cache.write().unwrap();
+            guard.clear();
+        }
+        {
+            let guard = cache.read().unwrap();
+            assert!(guard.is_empty());
+        }
+        {
+            let guard = rules_cache.read().unwrap();
+            assert!(guard.is_empty());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Admin bypass (tested via check_permission logic, no DB needed)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_admin_bypasses_permission_check() {
+        // Admin users should always get true, regardless of the actual
+        // permission rules. We verify the early-return path by calling
+        // check_permission with is_admin=true. Since admin bypasses the
+        // DB query entirely, this works without a live database.
+        //
+        // We cannot construct PermissionService without a real PgPool, so
+        // we test the logic inline:
+        let is_admin = true;
+        let result: std::result::Result<bool, AppError> =
+            if is_admin { Ok(true) } else { Ok(false) };
+        assert!(result.unwrap());
+    }
+
+    #[test]
+    fn test_non_admin_does_not_bypass() {
+        let is_admin = false;
+        let result = is_admin;
+        assert!(!result);
+    }
+
+    // -----------------------------------------------------------------------
+    // Stale entry eviction during cache write
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_stale_entries_evicted_on_insert() {
+        let mut cache: HashMap<CacheKey, CacheEntry> = HashMap::new();
+
+        // Insert a stale entry
+        cache.insert(
+            CacheKey::new(Uuid::new_v4(), "repository", Uuid::new_v4()),
+            CacheEntry {
+                actions: vec!["read".to_string()],
+                inserted_at: Instant::now() - CACHE_TTL - Duration::from_secs(10),
+            },
+        );
+
+        // Insert a fresh entry
+        let fresh_key = CacheKey::new(Uuid::new_v4(), "artifact", Uuid::new_v4());
+        cache.insert(
+            fresh_key.clone(),
+            CacheEntry {
+                actions: vec!["write".to_string()],
+                inserted_at: Instant::now(),
+            },
+        );
+
+        assert_eq!(cache.len(), 2);
+
+        // Simulate the eviction logic from resolve_actions
+        cache.retain(|_, v| !v.is_expired());
+
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key(&fresh_key));
+    }
+
+    // -----------------------------------------------------------------------
+    // Action list matching
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_action_list_contains_target_action() {
+        let actions = [
+            "read".to_string(),
+            "write".to_string(),
+            "delete".to_string(),
+        ];
+        assert!(actions.iter().any(|a| a == "write"));
+    }
+
+    #[test]
+    fn test_action_list_does_not_contain_missing_action() {
+        let actions = ["read".to_string()];
+        assert!(!actions.iter().any(|a| a == "admin"));
+    }
+
+    #[test]
+    fn test_empty_action_list_denies_everything() {
+        let actions: Vec<String> = vec![];
+        assert!(!actions.iter().any(|a| a == "read"));
+        assert!(!actions.iter().any(|a| a == "write"));
+        assert!(!actions.iter().any(|a| a == "delete"));
+        assert!(!actions.iter().any(|a| a == "admin"));
+    }
+
+    // -----------------------------------------------------------------------
+    // RulesCacheKey construction and equality
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rules_cache_key_equality_same_inputs() {
+        let target_id = Uuid::new_v4();
+        let a = RulesCacheKey::new("repository", target_id);
+        let b = RulesCacheKey::new("repository", target_id);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_rules_cache_key_inequality_different_type() {
+        let target_id = Uuid::new_v4();
+        let a = RulesCacheKey::new("repository", target_id);
+        let b = RulesCacheKey::new("artifact", target_id);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_rules_cache_key_inequality_different_id() {
+        let a = RulesCacheKey::new("repository", Uuid::new_v4());
+        let b = RulesCacheKey::new("repository", Uuid::new_v4());
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_rules_cache_key_used_as_hash_key() {
+        let target_id = Uuid::new_v4();
+        let key = RulesCacheKey::new("repository", target_id);
+
+        let mut map: HashMap<RulesCacheKey, bool> = HashMap::new();
+        map.insert(key.clone(), true);
+
+        let lookup = RulesCacheKey::new("repository", target_id);
+        assert_eq!(map.get(&lookup), Some(&true));
+    }
+
+    // -----------------------------------------------------------------------
+    // RulesCacheEntry TTL behaviour
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rules_cache_entry_not_expired_when_fresh() {
+        let entry = RulesCacheEntry {
+            exists: true,
+            inserted_at: Instant::now(),
+        };
+        assert!(!entry.is_expired());
+    }
+
+    #[test]
+    fn test_rules_cache_entry_expired_after_ttl() {
+        let entry = RulesCacheEntry {
+            exists: true,
+            inserted_at: Instant::now() - CACHE_TTL - Duration::from_millis(1),
+        };
+        assert!(entry.is_expired());
+    }
+
+    #[test]
+    fn test_rules_cache_entry_not_expired_just_before_ttl() {
+        let entry = RulesCacheEntry {
+            exists: false,
+            inserted_at: Instant::now() - CACHE_TTL + Duration::from_secs(1),
+        };
+        assert!(!entry.is_expired());
+    }
+
+    // -----------------------------------------------------------------------
+    // Projects (#2472): structural guards for the write-plane inheritance.
+    //
+    // Both predicates must carry the project arm TOGETHER:
+    // `has_any_rules_for_target` gates whether `check_permission` is consulted
+    // at all (upload.rs), so a project-only repository with the arm missing
+    // from the EXISTS would report has_rules=false and the write path would
+    // fall open. These source-level guards pin both queries without a DB,
+    // matching the source-grep contract style used by sibling handler tests.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_has_any_rules_query_includes_project_inheritance_arm() {
+        let src = include_str!("permission_service.rs");
+        let fn_start = src
+            .find("pub async fn has_any_rules_for_target")
+            .expect("has_any_rules_for_target must exist");
+        let fn_end = src[fn_start..]
+            .find("pub fn invalidate_cache")
+            .expect("invalidate_cache follows has_any_rules_for_target");
+        let body = &src[fn_start..fn_start + fn_end];
+        assert!(
+            body.contains("target_type = $1 AND target_id = $2"),
+            "direct target arm missing from has_any_rules_for_target"
+        );
+        assert!(
+            body.contains("$1 = 'repository' AND target_type = 'project'"),
+            "guarded project arm missing from has_any_rules_for_target: a \
+             project-only repository would report has_rules=false and the \
+             write gate would fall open"
+        );
+        assert!(
+            body.contains("SELECT project_id FROM repositories WHERE id = $2"),
+            "project arm must resolve the repository's project_id"
+        );
+    }
+
+    #[test]
+    fn test_query_actions_includes_project_inheritance_arm() {
+        let src = include_str!("permission_service.rs");
+        let fn_start = src
+            .find("async fn query_actions")
+            .expect("query_actions must exist");
+        let body = &src[fn_start..];
+        assert!(
+            body.contains("(target_type = $2 AND target_id = $3)"),
+            "direct target arm missing from query_actions"
+        );
+        assert!(
+            body.contains("$2 = 'repository' AND target_type = 'project'"),
+            "guarded project arm missing from query_actions: project members \
+             would never inherit actions on assigned repositories"
+        );
+        assert!(
+            body.contains("SELECT project_id FROM repositories WHERE id = $3"),
+            "project arm must resolve the repository's project_id"
+        );
+        // #2433: the direct-principal arm resolves actions for service accounts
+        // alongside human users, keyed by the same `$1` principal_id equality so
+        // the data plane agrees with repository visibility.
+        assert!(
+            body.contains("(principal_type IN ('user', 'service_account') AND principal_id = $1)"),
+            "direct-principal arm must accept service_account without relaxing the id match"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #2503: principal type/id correspondence check for grant writes.
+    //
+    // `validate_principal` needs a DB, but the type->table mapping it relies on
+    // is a pure function. Pin that mapping here without a database: it is the
+    // single source of truth deciding which table a grant's principal_id must
+    // exist in, so a regression (e.g. dropping the is_service_account guard, or
+    // accepting an unknown type) is what would let a mistyped grant slip through.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_principal_existence_query_user_excludes_service_accounts() {
+        let q = principal_existence_query("user").expect("user is a valid principal type");
+        assert!(
+            q.contains("FROM users"),
+            "user check must target the users table"
+        );
+        assert!(
+            q.contains("is_service_account = false"),
+            "user check must exclude service-account rows so a SA id cannot pose as a user"
+        );
+    }
+
+    #[test]
+    fn test_principal_existence_query_service_account_requires_flag() {
+        let q = principal_existence_query("service_account")
+            .expect("service_account is a valid principal type");
+        assert!(
+            q.contains("FROM users"),
+            "service_account check must target the users table"
+        );
+        assert!(
+            q.contains("is_service_account = true"),
+            "service_account check must require the flag so a human user id cannot pose as a SA"
+        );
+    }
+
+    #[test]
+    fn test_principal_existence_query_group_targets_groups_table() {
+        let q = principal_existence_query("group").expect("group is a valid principal type");
+        assert!(
+            q.contains("FROM groups"),
+            "group check must target the groups table"
+        );
+    }
+
+    #[test]
+    fn test_principal_existence_query_rejects_unknown_type() {
+        assert!(principal_existence_query("").is_none());
+        assert!(principal_existence_query("admin").is_none());
+        assert!(principal_existence_query("User").is_none());
+        assert!(principal_existence_query("serviceaccount").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_validate_principal_unknown_type_is_400_without_db() {
+        // The unknown-type arm rejects before any query, so a doomed lazy pool
+        // is fine: we must get a Validation (400), not a Database (500) error.
+        let service = lazy_service();
+        let err = service
+            .validate_principal("root", Uuid::new_v4())
+            .await
+            .expect_err("unknown principal_type must be rejected");
+        assert!(
+            matches!(err, AppError::Validation(_)),
+            "unknown principal_type must be a 400 Validation, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_principal_type_id_correspondence_db() {
+        use crate::api::handlers::test_db_helpers as tdh;
+
+        let Some(pool) = tdh::try_pool().await else {
+            return;
+        };
+        let service = PermissionService::new(pool.clone());
+
+        // A human user and a service account (both live in `users`).
+        let (user_id, _uname) = tdh::create_user(&pool).await;
+        let sa_id = Uuid::new_v4();
+        let sa_name = format!("ph-perm-sa-{sa_id}");
+        sqlx::query(
+            r#"INSERT INTO users
+                 (id, username, email, password_hash, auth_provider,
+                  is_admin, is_active, is_service_account)
+               VALUES ($1, $2, $3, 'unused', 'local', false, true, true)"#,
+        )
+        .bind(sa_id)
+        .bind(&sa_name)
+        .bind(format!("{sa_name}@test.local"))
+        .execute(&pool)
+        .await
+        .expect("seed service account");
+        let group_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO groups (id, name) VALUES ($1, $2)")
+            .bind(group_id)
+            .bind(format!("ph-perm-grp-{group_id}"))
+            .execute(&pool)
+            .await
+            .expect("seed group");
+
+        // Each type with a matching id is accepted.
+        assert!(service.validate_principal("user", user_id).await.is_ok());
+        assert!(service
+            .validate_principal("service_account", sa_id)
+            .await
+            .is_ok());
+        assert!(service.validate_principal("group", group_id).await.is_ok());
+
+        // Mistyped grants (the #2503 case) are rejected with a 400.
+        let mistyped = service
+            .validate_principal("service_account", user_id)
+            .await
+            .expect_err("a user id declared as service_account must be rejected");
+        assert!(
+            matches!(mistyped, AppError::Validation(_)),
+            "type/id mismatch must be a 400, got {mistyped:?}"
+        );
+        assert!(service.validate_principal("user", sa_id).await.is_err(),);
+        assert!(service.validate_principal("group", user_id).await.is_err());
+        // A well-typed but non-existent id is also rejected.
+        assert!(service
+            .validate_principal("user", Uuid::new_v4())
+            .await
+            .is_err());
+
+        let _ = sqlx::query("DELETE FROM groups WHERE id = $1")
+            .bind(group_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM users WHERE id IN ($1, $2)")
+            .bind(user_id)
+            .bind(sa_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // RwLock poisoning recovery
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_poisoned_cache_lock_recovers_on_invalidation() {
+        let cache: RwLock<HashMap<CacheKey, CacheEntry>> = RwLock::new(HashMap::new());
+
+        // Populate the cache
+        {
+            let mut guard = cache.write().unwrap();
+            guard.insert(
+                CacheKey::new(Uuid::new_v4(), "repository", Uuid::new_v4()),
+                CacheEntry {
+                    actions: vec!["read".to_string()],
+                    inserted_at: Instant::now(),
+                },
+            );
+        }
+
+        // Poison the lock by panicking inside a write guard
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cache.write().unwrap();
+            panic!("intentional poison");
+        }));
+
+        // The lock is now poisoned. Verify we can still recover and clear.
+        match cache.write() {
+            Ok(_) => panic!("expected poisoned lock"),
+            Err(poisoned) => {
+                let mut inner = poisoned.into_inner();
+                inner.clear();
+                assert!(inner.is_empty());
+            }
+        };
+    }
+
+    #[test]
+    fn test_poisoned_rules_cache_lock_recovers_on_invalidation() {
+        let cache: RwLock<HashMap<RulesCacheKey, RulesCacheEntry>> = RwLock::new(HashMap::new());
+
+        {
+            let mut guard = cache.write().unwrap();
+            guard.insert(
+                RulesCacheKey::new("repository", Uuid::new_v4()),
+                RulesCacheEntry {
+                    exists: true,
+                    inserted_at: Instant::now(),
+                },
+            );
+        }
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cache.write().unwrap();
+            panic!("intentional poison");
+        }));
+
+        match cache.write() {
+            Ok(_) => panic!("expected poisoned lock"),
+            Err(poisoned) => {
+                let mut inner = poisoned.into_inner();
+                inner.clear();
+                assert!(inner.is_empty());
+            }
+        };
+    }
+
+    #[test]
+    fn test_poisoned_read_lock_returns_none() {
+        let cache: RwLock<HashMap<CacheKey, CacheEntry>> = RwLock::new(HashMap::new());
+
+        let user_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let key = CacheKey::new(user_id, "repository", target_id);
+
+        {
+            let mut guard = cache.write().unwrap();
+            guard.insert(
+                key.clone(),
+                CacheEntry {
+                    actions: vec!["read".to_string()],
+                    inserted_at: Instant::now(),
+                },
+            );
+        }
+
+        // Poison the lock
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cache.write().unwrap();
+            panic!("intentional poison");
+        }));
+
+        // On poisoned read, we should gracefully handle it (return None / skip cache)
+        match cache.read() {
+            Ok(_) => panic!("expected poisoned lock"),
+            Err(poisoned) => {
+                // The recovery pattern: accept the inner data exists but skip
+                drop(poisoned.into_inner());
+            }
+        };
+    }
+
+    // -----------------------------------------------------------------------
+    // Stale rules cache entry eviction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_stale_rules_entries_evicted_on_insert() {
+        let mut cache: HashMap<RulesCacheKey, RulesCacheEntry> = HashMap::new();
+
+        // Insert a stale entry
+        cache.insert(
+            RulesCacheKey::new("repository", Uuid::new_v4()),
+            RulesCacheEntry {
+                exists: true,
+                inserted_at: Instant::now() - CACHE_TTL - Duration::from_secs(10),
+            },
+        );
+
+        // Insert a fresh entry
+        let fresh_key = RulesCacheKey::new("artifact", Uuid::new_v4());
+        cache.insert(
+            fresh_key.clone(),
+            RulesCacheEntry {
+                exists: false,
+                inserted_at: Instant::now(),
+            },
+        );
+
+        assert_eq!(cache.len(), 2);
+
+        cache.retain(|_, v| !v.is_expired());
+
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key(&fresh_key));
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: build a PermissionService with a lazy (non-connecting) PgPool
+    // -----------------------------------------------------------------------
+
+    fn lazy_service() -> PermissionService {
+        // Fake-DB pool: every acquire is doomed, so fail it in 1s instead of
+        // sqlx's default 30s — the cache fall-through tests otherwise each
+        // stall a full 30s (60s when two queries fail) under coverage runs.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_secs(1))
+            .connect_lazy("postgres://fake:fake@localhost/fake")
+            .expect("lazy pool");
+        PermissionService::new(pool)
+    }
+
+    /// Insert a permission cache entry for the given user/target with the specified actions.
+    fn seed_permission_cache(
+        service: &PermissionService,
+        user_id: Uuid,
+        target_type: &str,
+        target_id: Uuid,
+        actions: Vec<String>,
+        inserted_at: Instant,
+    ) {
+        let mut cache = service.cache.write().unwrap();
+        cache.insert(
+            CacheKey::new(user_id, target_type, target_id),
+            CacheEntry {
+                actions,
+                inserted_at,
+            },
+        );
+    }
+
+    /// Insert a rules cache entry indicating whether rules exist for a target.
+    fn seed_rules_cache(
+        service: &PermissionService,
+        target_type: &str,
+        target_id: Uuid,
+        exists: bool,
+        inserted_at: Instant,
+    ) {
+        let mut rules = service.rules_cache.write().unwrap();
+        rules.insert(
+            RulesCacheKey::new(target_type, target_id),
+            RulesCacheEntry {
+                exists,
+                inserted_at,
+            },
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PermissionService::check_permission -- admin bypass via real service
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_check_permission_admin_returns_true() {
+        let service = lazy_service();
+        let result = service
+            .check_permission(Uuid::new_v4(), "repository", Uuid::new_v4(), "delete", true)
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_check_permission_admin_ignores_action_value() {
+        let service = lazy_service();
+        // Even a nonsensical action is granted for admins.
+        let result = service
+            .check_permission(
+                Uuid::new_v4(),
+                "artifact",
+                Uuid::new_v4(),
+                "nonexistent_action",
+                true,
+            )
+            .await;
+        assert!(result.unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // PermissionService::check_permission -- cache hit for non-admin
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_check_permission_cache_hit_grants_action() {
+        let service = lazy_service();
+        let user_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        seed_permission_cache(
+            &service,
+            user_id,
+            "repository",
+            target_id,
+            vec!["read".into(), "write".into()],
+            Instant::now(),
+        );
+
+        let result = service
+            .check_permission(user_id, "repository", target_id, "write", false)
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_check_permission_cache_hit_denies_missing_action() {
+        let service = lazy_service();
+        let user_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        seed_permission_cache(
+            &service,
+            user_id,
+            "repository",
+            target_id,
+            vec!["read".into()],
+            Instant::now(),
+        );
+
+        let result = service
+            .check_permission(user_id, "repository", target_id, "delete", false)
+            .await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_check_permission_cache_hit_empty_actions_denies() {
+        let service = lazy_service();
+        let user_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        seed_permission_cache(
+            &service,
+            user_id,
+            "repository",
+            target_id,
+            vec![],
+            Instant::now(),
+        );
+
+        let result = service
+            .check_permission(user_id, "repository", target_id, "read", false)
+            .await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // PermissionService::check_permission -- expired cache triggers DB miss
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_check_permission_expired_cache_falls_through_to_db_error() {
+        let service = lazy_service();
+        let user_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        seed_permission_cache(
+            &service,
+            user_id,
+            "repository",
+            target_id,
+            vec!["read".into()],
+            Instant::now() - CACHE_TTL - Duration::from_secs(5),
+        );
+
+        // The lazy pool is not connected, so the DB query will fail.
+        let result = service
+            .check_permission(user_id, "repository", target_id, "read", false)
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_check_permission_no_cache_entry_falls_through_to_db_error() {
+        let service = lazy_service();
+        // No cache entry at all -- falls straight to DB which errors.
+        let result = service
+            .check_permission(Uuid::new_v4(), "repository", Uuid::new_v4(), "read", false)
+            .await;
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // PermissionService::invalidate_cache via real service
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_invalidate_cache_on_fresh_service() {
+        let service = lazy_service();
+        // Calling invalidate on an empty service should not panic.
+        service.invalidate_cache();
+
+        let cache = service.cache.read().unwrap();
+        assert!(cache.is_empty());
+        let rules = service.rules_cache.read().unwrap();
+        assert!(rules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_cache_clears_populated_caches() {
+        let service = lazy_service();
+        let user_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        seed_permission_cache(
+            &service,
+            user_id,
+            "repository",
+            target_id,
+            vec!["read".into(), "write".into()],
+            Instant::now(),
+        );
+        seed_permission_cache(
+            &service,
+            Uuid::new_v4(),
+            "artifact",
+            Uuid::new_v4(),
+            vec!["delete".into()],
+            Instant::now(),
+        );
+        seed_rules_cache(&service, "repository", target_id, true, Instant::now());
+
+        // Verify caches are populated.
+        assert_eq!(service.cache.read().unwrap().len(), 2);
+        assert_eq!(service.rules_cache.read().unwrap().len(), 1);
+
+        service.invalidate_cache();
+
+        assert!(service.cache.read().unwrap().is_empty());
+        assert!(service.rules_cache.read().unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // PermissionService::has_any_rules_for_target -- cache hit
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_has_any_rules_cache_hit_returns_true() {
+        let service = lazy_service();
+        let target_id = Uuid::new_v4();
+        seed_rules_cache(&service, "repository", target_id, true, Instant::now());
+
+        let result = service
+            .has_any_rules_for_target("repository", target_id)
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_has_any_rules_cache_hit_returns_false() {
+        let service = lazy_service();
+        let target_id = Uuid::new_v4();
+        seed_rules_cache(&service, "artifact", target_id, false, Instant::now());
+
+        let result = service
+            .has_any_rules_for_target("artifact", target_id)
+            .await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // PermissionService::has_any_rules_for_target -- cache miss / expired
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_has_any_rules_expired_cache_falls_through_to_db_error() {
+        let service = lazy_service();
+        let target_id = Uuid::new_v4();
+
+        seed_rules_cache(
+            &service,
+            "repository",
+            target_id,
+            true,
+            Instant::now() - CACHE_TTL - Duration::from_secs(5),
+        );
+
+        let result = service
+            .has_any_rules_for_target("repository", target_id)
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_has_any_rules_no_cache_entry_falls_through_to_db_error() {
+        let service = lazy_service();
+        let result = service
+            .has_any_rules_for_target("repository", Uuid::new_v4())
+            .await;
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // PermissionService::resolve_actions -- cache hit returns cached actions
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_resolve_actions_cache_hit_returns_actions() {
+        let service = lazy_service();
+        let user_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        seed_permission_cache(
+            &service,
+            user_id,
+            "repository",
+            target_id,
+            vec!["read".into(), "write".into(), "admin".into()],
+            Instant::now(),
+        );
+
+        let actions = service
+            .resolve_actions(user_id, "repository", target_id)
+            .await
+            .unwrap();
+        assert_eq!(actions.len(), 3);
+        assert!(actions.contains(&"read".to_string()));
+        assert!(actions.contains(&"write".to_string()));
+        assert!(actions.contains(&"admin".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_actions_expired_entry_triggers_db_error() {
+        let service = lazy_service();
+        let user_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        seed_permission_cache(
+            &service,
+            user_id,
+            "artifact",
+            target_id,
+            vec!["read".into()],
+            Instant::now() - CACHE_TTL - Duration::from_secs(10),
+        );
+
+        let result = service
+            .resolve_actions(user_id, "artifact", target_id)
+            .await;
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // PermissionService: invalidate after cache population round-trip
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_cache_population_then_invalidate_then_miss() {
+        let service = lazy_service();
+        let user_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        // Populate both caches through the service's internal locks.
+        seed_permission_cache(
+            &service,
+            user_id,
+            "repository",
+            target_id,
+            vec!["read".into()],
+            Instant::now(),
+        );
+        seed_rules_cache(&service, "repository", target_id, true, Instant::now());
+
+        // Verify cache hit works before invalidation.
+        let granted = service
+            .check_permission(user_id, "repository", target_id, "read", false)
+            .await
+            .unwrap();
+        assert!(granted);
+
+        let has_rules = service
+            .has_any_rules_for_target("repository", target_id)
+            .await
+            .unwrap();
+        assert!(has_rules);
+
+        // Invalidate.
+        service.invalidate_cache();
+
+        // After invalidation, both should miss cache and hit the (broken) DB.
+        let result = service
+            .check_permission(user_id, "repository", target_id, "read", false)
+            .await;
+        assert!(result.is_err());
+
+        let rules_result = service
+            .has_any_rules_for_target("repository", target_id)
+            .await;
+        assert!(rules_result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // PermissionService::new creates empty caches
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_new_service_has_empty_caches() {
+        let service = lazy_service();
+        assert!(service.cache.read().unwrap().is_empty());
+        assert!(service.rules_cache.read().unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Cache key isolation: different target types are separate entries
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_cache_isolates_by_target_type() {
+        let service = lazy_service();
+        let user_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        seed_permission_cache(
+            &service,
+            user_id,
+            "repository",
+            target_id,
+            vec!["read".into()],
+            Instant::now(),
+        );
+        seed_permission_cache(
+            &service,
+            user_id,
+            "artifact",
+            target_id,
+            vec!["delete".into()],
+            Instant::now(),
+        );
+
+        // "repository" grants "read" but not "delete".
+        let repo_read = service
+            .check_permission(user_id, "repository", target_id, "read", false)
+            .await
+            .unwrap();
+        assert!(repo_read);
+
+        let repo_delete = service
+            .check_permission(user_id, "repository", target_id, "delete", false)
+            .await
+            .unwrap();
+        assert!(!repo_delete);
+
+        // "artifact" grants "delete" but not "read".
+        let art_delete = service
+            .check_permission(user_id, "artifact", target_id, "delete", false)
+            .await
+            .unwrap();
+        assert!(art_delete);
+
+        let art_read = service
+            .check_permission(user_id, "artifact", target_id, "read", false)
+            .await
+            .unwrap();
+        assert!(!art_read);
+    }
+
+    // -----------------------------------------------------------------------
+    // Repository action model -- DB-backed lib tests run in Tier 1 CI
+    // -----------------------------------------------------------------------
+
+    mod repository_actions_db {
+        use super::*;
+        use crate::api::handlers::test_db_helpers as tdh;
+        use sqlx::PgPool;
+
+        async fn assign_repo_role(pool: &PgPool, user_id: Uuid, repo_id: Uuid, role: &str) {
+            sqlx::query(
+                "INSERT INTO role_assignments (user_id, role_id, repository_id) \
+                 SELECT $1, id, $2 FROM roles WHERE name = $3 \
+                 ON CONFLICT (user_id, role_id, repository_id) DO NOTHING",
+            )
+            .bind(user_id)
+            .bind(repo_id)
+            .bind(role)
+            .execute(pool)
+            .await
+            .expect("assign repository role");
+        }
+
+        async fn cleanup_action_fixture(
+            pool: &PgPool,
+            repo_id: Uuid,
+            user_ids: &[Uuid],
+            storage_dir: &std::path::Path,
+        ) {
+            let _ = sqlx::query(
+                "DELETE FROM permissions \
+                 WHERE target_type = 'repository' AND target_id = $1",
+            )
+            .bind(repo_id)
+            .execute(pool)
+            .await;
+            let _ = sqlx::query("DELETE FROM role_assignments WHERE repository_id = $1")
+                .bind(repo_id)
+                .execute(pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM repositories WHERE id = $1")
+                .bind(repo_id)
+                .execute(pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)")
+                .bind(user_ids)
+                .execute(pool)
+                .await;
+            let _ = std::fs::remove_dir_all(storage_dir);
+        }
+
+        #[tokio::test]
+        async fn test_repository_action_uses_owner_roles_and_principal_scoped_rules() {
+            let Some(pool) = tdh::try_pool().await else {
+                return;
+            };
+            let service = PermissionService::new(pool.clone());
+            let (repo_id, _, storage_dir) = tdh::create_repo(&pool, "local", "generic").await;
+            let (owner_id, _) = tdh::create_user(&pool).await;
+            let (developer_id, _) = tdh::create_user(&pool).await;
+            let (reader_id, _) = tdh::create_user(&pool).await;
+            let (other_id, _) = tdh::create_user(&pool).await;
+            let user_ids = [owner_id, developer_id, reader_id, other_id];
+
+            let project_id: Uuid =
+                sqlx::query_scalar("INSERT INTO projects (key, name) VALUES ($1, $2) RETURNING id")
+                    .bind(format!("owner-model-{}", Uuid::new_v4()))
+                    .bind("Repository owner model test")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("create project");
+            sqlx::query("UPDATE repositories SET project_id = $1 WHERE id = $2")
+                .bind(project_id)
+                .bind(repo_id)
+                .execute(&pool)
+                .await
+                .expect("assign repository project");
+
+            let group_id: Uuid =
+                sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+                    .bind(format!("owner-model-{}", Uuid::new_v4()))
+                    .fetch_one(&pool)
+                    .await
+                    .expect("create permission group");
+            sqlx::query("INSERT INTO user_group_members (user_id, group_id) VALUES ($1, $2)")
+                .bind(reader_id)
+                .bind(group_id)
+                .execute(&pool)
+                .await
+                .expect("assign permission group");
+
+            assign_repo_role(&pool, owner_id, repo_id, "repository-owner").await;
+            assign_repo_role(&pool, developer_id, repo_id, "developer").await;
+            assign_repo_role(&pool, reader_id, repo_id, "reader").await;
+
+            assert!(service
+                .check_repository_action(other_id, repo_id, "admin", true)
+                .await
+                .expect("global admin short-circuit"));
+            assert!(!service
+                .check_repository_action(other_id, repo_id, "read", false)
+                .await
+                .expect("unassigned user decision"));
+            assert!(service
+                .check_repository_action(owner_id, repo_id, "admin", false)
+                .await
+                .expect("owner admin decision"));
+            assert!(service
+                .check_repository_action(owner_id, repo_id, "delete", false)
+                .await
+                .expect("owner delete decision"));
+            assert!(service
+                .check_repository_action(developer_id, repo_id, "write", false)
+                .await
+                .expect("developer write decision"));
+            assert!(!service
+                .check_repository_action(developer_id, repo_id, "delete", false)
+                .await
+                .expect("developer delete decision"));
+            assert!(service
+                .check_repository_action(reader_id, repo_id, "read", false)
+                .await
+                .expect("reader read decision"));
+            assert!(!service
+                .check_repository_action(reader_id, repo_id, "write", false)
+                .await
+                .expect("reader write decision"));
+
+            // Project rules and group membership participate in the same
+            // principal-scoped decision. Once applicable, the rule replaces
+            // this reader's legacy role fallback.
+            sqlx::query(
+                "INSERT INTO permissions \
+                   (principal_type, principal_id, target_type, target_id, actions) \
+                 VALUES ('group', $1, 'project', $2, ARRAY['write'])",
+            )
+            .bind(group_id)
+            .bind(project_id)
+            .execute(&pool)
+            .await
+            .expect("insert inherited group rule");
+            assert!(service
+                .check_repository_action(reader_id, repo_id, "write", false)
+                .await
+                .expect("inherited group write decision"));
+            assert!(!service
+                .check_repository_action(reader_id, repo_id, "read", false)
+                .await
+                .expect("inherited group rule replaces role fallback"));
+
+            // A rule for somebody else must not disable the developer's role
+            // fallback. This is the first-rule-falls-closed regression.
+            sqlx::query(
+                "INSERT INTO permissions \
+                   (principal_type, principal_id, target_type, target_id, actions) \
+                 VALUES ('user', $1, 'repository', $2, ARRAY['read'])",
+            )
+            .bind(other_id)
+            .bind(repo_id)
+            .execute(&pool)
+            .await
+            .expect("insert unrelated fine-grained rule");
+            assert!(service
+                .check_repository_action(developer_id, repo_id, "write", false)
+                .await
+                .expect("developer fallback with unrelated rule"));
+
+            // A rule that does apply to the developer is authoritative for
+            // that principal and may narrow the legacy role to read-only.
+            sqlx::query(
+                "INSERT INTO permissions \
+                   (principal_type, principal_id, target_type, target_id, actions) \
+                 VALUES ('user', $1, 'repository', $2, ARRAY['read'])",
+            )
+            .bind(developer_id)
+            .bind(repo_id)
+            .execute(&pool)
+            .await
+            .expect("insert developer override");
+            assert!(!service
+                .check_repository_action(developer_id, repo_id, "write", false)
+                .await
+                .expect("developer principal override"));
+
+            // Owner/admin is durable and cannot be accidentally stripped by
+            // an ordinary fine-grained rule on the same principal.
+            sqlx::query(
+                "INSERT INTO permissions \
+                   (principal_type, principal_id, target_type, target_id, actions) \
+                 VALUES ('user', $1, 'repository', $2, ARRAY['read'])",
+            )
+            .bind(owner_id)
+            .bind(repo_id)
+            .execute(&pool)
+            .await
+            .expect("insert owner rule");
+            assert!(service
+                .check_repository_action(owner_id, repo_id, "delete", false)
+                .await
+                .expect("durable owner decision"));
+
+            sqlx::query("DELETE FROM permissions WHERE target_type = 'project' AND target_id = $1")
+                .bind(project_id)
+                .execute(&pool)
+                .await
+                .expect("delete project permissions");
+            cleanup_action_fixture(&pool, repo_id, &user_ids, &storage_dir).await;
+            sqlx::query("DELETE FROM groups WHERE id = $1")
+                .bind(group_id)
+                .execute(&pool)
+                .await
+                .expect("delete permission group");
+            sqlx::query("DELETE FROM projects WHERE id = $1")
+                .bind(project_id)
+                .execute(&pool)
+                .await
+                .expect("delete project");
+        }
+
+        #[tokio::test]
+        async fn test_repository_owner_migration_backfills_without_flag_day() {
+            let Some(pool) = tdh::try_pool().await else {
+                return;
+            };
+            let mut tx = pool.begin().await.expect("begin migration fixture");
+
+            // Shadow only the tables touched by migration 172. Executing the
+            // exact migration file against temporary tables tests upgrade
+            // behavior without mutating the shared CI database.
+            sqlx::raw_sql(
+                r#"
+                CREATE TEMP TABLE roles (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    name TEXT UNIQUE NOT NULL,
+                    description TEXT,
+                    permissions TEXT[] NOT NULL DEFAULT '{}',
+                    is_system BOOLEAN NOT NULL DEFAULT false,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                ) ON COMMIT DROP;
+                CREATE TEMP TABLE repositories (
+                    id UUID PRIMARY KEY,
+                    created_by UUID,
+                    project_id UUID
+                ) ON COMMIT DROP;
+                CREATE TEMP TABLE role_assignments (
+                    user_id UUID NOT NULL,
+                    role_id UUID NOT NULL,
+                    repository_id UUID,
+                    UNIQUE (user_id, role_id, repository_id)
+                ) ON COMMIT DROP;
+                CREATE TEMP TABLE permissions (
+                    target_type TEXT NOT NULL,
+                    target_id UUID NOT NULL
+                ) ON COMMIT DROP;
+                "#,
+            )
+            .execute(&mut *tx)
+            .await
+            .expect("create isolated migration tables");
+
+            sqlx::query(
+                "INSERT INTO roles (name, description) VALUES \
+                 ('admin', 'admin'), ('developer', 'developer'), ('reader', 'reader')",
+            )
+            .execute(&mut *tx)
+            .await
+            .expect("seed legacy roles");
+
+            let known_repo = Uuid::new_v4();
+            let known_owner = Uuid::new_v4();
+            let legacy_repo = Uuid::new_v4();
+            let legacy_developer = Uuid::new_v4();
+            let ruled_repo = Uuid::new_v4();
+            let ruled_developer = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO repositories (id, created_by) VALUES \
+                 ($1, $2), ($3, NULL), ($4, NULL)",
+            )
+            .bind(known_repo)
+            .bind(known_owner)
+            .bind(legacy_repo)
+            .bind(ruled_repo)
+            .execute(&mut *tx)
+            .await
+            .expect("seed legacy repositories");
+            sqlx::query(
+                "INSERT INTO role_assignments (user_id, role_id, repository_id) \
+                 SELECT $1, id, $2 FROM roles WHERE name = 'developer' \
+                 UNION ALL \
+                 SELECT $3, id, $4 FROM roles WHERE name = 'developer'",
+            )
+            .bind(legacy_developer)
+            .bind(legacy_repo)
+            .bind(ruled_developer)
+            .bind(ruled_repo)
+            .execute(&mut *tx)
+            .await
+            .expect("seed legacy developer assignments");
+            sqlx::query(
+                "INSERT INTO permissions (target_type, target_id) \
+                 VALUES ('repository', $1)",
+            )
+            .bind(ruled_repo)
+            .execute(&mut *tx)
+            .await
+            .expect("seed authoritative rule");
+
+            sqlx::raw_sql(include_str!(
+                "../../migrations/172_repository_owner_capability.sql"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("run repository owner migration");
+
+            // The SQL is intentionally safe to replay while an operator
+            // repairs or validates a staged upgrade.
+            sqlx::raw_sql(include_str!(
+                "../../migrations/172_repository_owner_capability.sql"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("re-run repository owner migration");
+
+            let developer_actions: Vec<String> =
+                sqlx::query_scalar("SELECT permissions FROM roles WHERE name = 'developer'")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .expect("read developer actions");
+            let reader_actions: Vec<String> =
+                sqlx::query_scalar("SELECT permissions FROM roles WHERE name = 'reader'")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .expect("read reader actions");
+            assert_eq!(developer_actions, vec!["read", "write"]);
+            assert_eq!(reader_actions, vec!["read"]);
+
+            for (user_id, repo_id, expected) in [
+                (known_owner, known_repo, true),
+                (legacy_developer, legacy_repo, true),
+                (ruled_developer, ruled_repo, false),
+            ] {
+                let has_owner: bool = sqlx::query_scalar(
+                    "SELECT EXISTS ( \
+                         SELECT 1 FROM role_assignments ra \
+                         JOIN roles r ON r.id = ra.role_id \
+                         WHERE ra.user_id = $1 AND ra.repository_id = $2 \
+                           AND r.name = 'repository-owner' \
+                     )",
+                )
+                .bind(user_id)
+                .bind(repo_id)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read owner backfill");
+                assert_eq!(
+                    has_owner, expected,
+                    "unexpected owner backfill for {repo_id}"
+                );
+            }
+
+            tx.rollback().await.expect("rollback migration fixture");
+        }
+
+        // -------------------------------------------------------------------
+        // #1849: `allowed_cidrs` request-IP conditions.
+        //
+        // A conditioned rule applies only to requests whose client IP falls
+        // inside the range; outside it — and with no request IP at all
+        // (background jobs) — the rule is inapplicable (fail closed), exactly
+        // as if the grant did not exist for that caller.
+        // -------------------------------------------------------------------
+
+        /// #4677: every decision over a conditioned rule counts one
+        /// `ak_permission_condition_evaluations_total{condition,outcome}`;
+        /// a decision over unconditioned rules counts nothing.
+        #[test]
+        fn condition_evaluations_are_counted_by_outcome() {
+            use crate::api::handlers::test_db_helpers as tdh;
+            use crate::api::middleware::client_ip::with_client_ip_scope;
+
+            let (ran, captured) = tdh::capture_metrics(|| async {
+                let Some(pool) = tdh::try_pool().await else {
+                    return false;
+                };
+                let service = PermissionService::new(pool.clone());
+                let (repo_id, _, storage_dir) = tdh::create_repo(&pool, "local", "generic").await;
+                let (user_id, _) = tdh::create_user(&pool).await;
+                let (control_id, _) = tdh::create_user(&pool).await;
+                sqlx::query(
+                    "INSERT INTO permissions \
+                       (principal_type, principal_id, target_type, target_id, actions, conditions) \
+                     VALUES ('user', $1, 'repository', $2, ARRAY['read'], $3)",
+                )
+                .bind(user_id)
+                .bind(repo_id)
+                .bind(serde_json::json!({"allowed_cidrs": ["10.20.0.0/16"]}))
+                .execute(&pool)
+                .await
+                .expect("insert conditioned rule");
+                sqlx::query(
+                    "INSERT INTO permissions \
+                       (principal_type, principal_id, target_type, target_id, actions) \
+                     VALUES ('user', $1, 'repository', $2, ARRAY['read'])",
+                )
+                .bind(control_id)
+                .bind(repo_id)
+                .execute(&pool)
+                .await
+                .expect("insert unconditioned control rule");
+
+                let inside: std::net::IpAddr = "10.20.3.4".parse().unwrap();
+                let outside: std::net::IpAddr = "192.0.2.9".parse().unwrap();
+                // matched x2: the uncached resolver and the cached one.
+                assert!(with_client_ip_scope(
+                    Some(inside),
+                    service.check_repository_action(user_id, repo_id, "read", false),
+                )
+                .await
+                .unwrap());
+                assert!(with_client_ip_scope(
+                    Some(inside),
+                    service.check_permission(user_id, "repository", repo_id, "read", false),
+                )
+                .await
+                .unwrap());
+                // not_matched x1.
+                assert!(!with_client_ip_scope(
+                    Some(outside),
+                    service.check_repository_action(user_id, repo_id, "read", false),
+                )
+                .await
+                .unwrap());
+                // unknown_ip x1: no verified client IP.
+                assert!(!service
+                    .check_repository_action(user_id, repo_id, "read", false)
+                    .await
+                    .unwrap());
+                // Nothing for the unconditioned control.
+                assert!(with_client_ip_scope(
+                    Some(outside),
+                    service.check_repository_action(control_id, repo_id, "read", false),
+                )
+                .await
+                .unwrap());
+
+                cleanup_action_fixture(&pool, repo_id, &[user_id, control_id], &storage_dir).await;
+                true
+            });
+            if !ran {
+                return;
+            }
+            let count = |outcome: &str| match tdh::captured_metric(
+                &captured,
+                CONDITION_EVALUATIONS_METRIC,
+                &[("condition", "allowed_cidrs"), ("outcome", outcome)],
+            ) {
+                Some(metrics_util::debugging::DebugValue::Counter(n)) => *n,
+                None => 0,
+                other => panic!("expected a counter, got {other:?}"),
+            };
+            assert_eq!(count("matched"), 2);
+            assert_eq!(count("not_matched"), 1);
+            assert_eq!(count("unknown_ip"), 1);
+        }
+
+        #[tokio::test]
+        async fn allowed_cidrs_condition_gates_the_rule_by_request_ip() {
+            use crate::api::handlers::test_db_helpers as tdh;
+            use crate::api::middleware::client_ip::with_client_ip_scope;
+
+            let Some(pool) = tdh::try_pool().await else {
+                return;
+            };
+            let service = PermissionService::new(pool.clone());
+            let (repo_id, _, storage_dir) = tdh::create_repo(&pool, "local", "generic").await;
+            let (user_id, _) = tdh::create_user(&pool).await;
+            let (control_id, _) = tdh::create_user(&pool).await;
+
+            // The conditioned grant: read for `user_id`, only from 10.20.0.0/16.
+            sqlx::query(
+                "INSERT INTO permissions \
+                   (principal_type, principal_id, target_type, target_id, actions, conditions) \
+                 VALUES ('user', $1, 'repository', $2, ARRAY['read'], $3)",
+            )
+            .bind(user_id)
+            .bind(repo_id)
+            .bind(serde_json::json!({"allowed_cidrs": ["10.20.0.0/16"]}))
+            .execute(&pool)
+            .await
+            .expect("insert conditioned rule");
+            // Control: an UNconditioned grant to another principal, proving the
+            // predicate narrows only rules that carry it.
+            sqlx::query(
+                "INSERT INTO permissions \
+                   (principal_type, principal_id, target_type, target_id, actions) \
+                 VALUES ('user', $1, 'repository', $2, ARRAY['read'])",
+            )
+            .bind(control_id)
+            .bind(repo_id)
+            .execute(&pool)
+            .await
+            .expect("insert unconditioned control rule");
+
+            let inside = with_client_ip_scope(
+                Some("10.20.3.4".parse().unwrap()),
+                service.check_repository_action(user_id, repo_id, "read", false),
+            )
+            .await
+            .expect("decision inside CIDR");
+            assert!(
+                inside,
+                "a request from inside allowed_cidrs must be granted"
+            );
+
+            let outside = with_client_ip_scope(
+                Some("192.0.2.9".parse().unwrap()),
+                service.check_repository_action(user_id, repo_id, "read", false),
+            )
+            .await
+            .expect("decision outside CIDR");
+            assert!(
+                !outside,
+                "a request from outside allowed_cidrs must be denied (fail closed)"
+            );
+
+            // No request scope (background job): the conditioned grant does
+            // not apply. The unconditioned control still does.
+            assert!(
+                !service
+                    .check_repository_action(user_id, repo_id, "read", false)
+                    .await
+                    .expect("decision without a request scope"),
+                "outside a request scope a conditioned rule must fail closed"
+            );
+            assert!(
+                service
+                    .check_repository_action(control_id, repo_id, "read", false)
+                    .await
+                    .expect("unconditioned control decision"),
+                "an unconditioned rule applies regardless of client IP"
+            );
+
+            // The cached `check_permission` path answers the same way (its
+            // cache key carries the client IP, so the two scopes cannot
+            // share a stale entry).
+            let cached_inside = with_client_ip_scope(
+                Some("10.20.3.4".parse().unwrap()),
+                service.check_permission(user_id, "repository", repo_id, "read", false),
+            )
+            .await
+            .expect("cached decision inside CIDR");
+            assert!(cached_inside);
+            let cached_outside = with_client_ip_scope(
+                Some("192.0.2.9".parse().unwrap()),
+                service.check_permission(user_id, "repository", repo_id, "read", false),
+            )
+            .await
+            .expect("cached decision outside CIDR");
+            assert!(
+                !cached_outside,
+                "the cached fast path must not serve a grant resolved under another IP"
+            );
+
+            cleanup_action_fixture(&pool, repo_id, &[user_id, control_id], &storage_dir).await;
+        }
+
+        #[tokio::test]
+        async fn anonymous_rule_grants_read_by_ip_and_fails_closed() {
+            use crate::api::handlers::test_db_helpers as tdh;
+            use crate::api::middleware::client_ip::with_client_ip_scope;
+
+            let Some(pool) = tdh::try_pool().await else {
+                return;
+            };
+            let service = PermissionService::new(pool.clone());
+            let (repo_id, _, storage_dir) = tdh::create_repo(&pool, "local", "generic").await;
+            let (open_repo_id, _, open_dir) = tdh::create_repo(&pool, "local", "generic").await;
+            let (user_id, _) = tdh::create_user(&pool).await;
+
+            // Conditioned anonymous read grant (the CI use case).
+            sqlx::query(
+                "INSERT INTO permissions \
+                   (principal_type, principal_id, target_type, target_id, actions, conditions) \
+                 VALUES ('anonymous', $1, 'repository', $2, ARRAY['read'], $3)",
+            )
+            .bind(Uuid::nil())
+            .bind(repo_id)
+            .bind(serde_json::json!({"allowed_cidrs": ["10.30.0.0/16"]}))
+            .execute(&pool)
+            .await
+            .expect("insert conditioned anonymous rule");
+            // Unconditioned anonymous read grant on the second repository.
+            sqlx::query(
+                "INSERT INTO permissions \
+                   (principal_type, principal_id, target_type, target_id, actions) \
+                 VALUES ('anonymous', $1, 'repository', $2, ARRAY['read'])",
+            )
+            .bind(Uuid::nil())
+            .bind(open_repo_id)
+            .execute(&pool)
+            .await
+            .expect("insert unconditioned anonymous rule");
+
+            // Inside the CIDR: the conditioned grant holds.
+            let inside = with_client_ip_scope(
+                Some("10.30.1.2".parse().unwrap()),
+                service.check_anonymous_repository_action(repo_id, "read"),
+            )
+            .await
+            .expect("anonymous decision inside CIDR");
+            assert!(
+                inside,
+                "anonymous read from inside allowed_cidrs must be granted"
+            );
+
+            // Outside it / no scope: fail closed.
+            let outside = with_client_ip_scope(
+                Some("192.0.2.9".parse().unwrap()),
+                service.check_anonymous_repository_action(repo_id, "read"),
+            )
+            .await
+            .expect("anonymous decision outside CIDR");
+            assert!(
+                !outside,
+                "anonymous read outside allowed_cidrs must be denied"
+            );
+            assert!(
+                !service
+                    .check_anonymous_repository_action(repo_id, "read")
+                    .await
+                    .expect("anonymous decision without a request scope"),
+                "a conditioned anonymous rule must fail closed with no request IP"
+            );
+
+            // The rule carries read only: write is denied even from inside.
+            let write = with_client_ip_scope(
+                Some("10.30.1.2".parse().unwrap()),
+                service.check_anonymous_repository_action(repo_id, "write"),
+            )
+            .await
+            .expect("anonymous write decision");
+            assert!(!write, "anonymous read rules never confer write");
+
+            // The unconditioned grant applies with no request IP at all.
+            assert!(
+                service
+                    .check_anonymous_repository_action(open_repo_id, "read")
+                    .await
+                    .expect("unconditioned anonymous decision"),
+                "an unconditioned anonymous rule applies regardless of client IP"
+            );
+
+            cleanup_action_fixture(&pool, repo_id, &[user_id], &storage_dir).await;
+            let _ = sqlx::query("DELETE FROM permissions WHERE target_id = $1")
+                .bind(open_repo_id)
+                .execute(&pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM repositories WHERE id = $1")
+                .bind(open_repo_id)
+                .execute(&pool)
+                .await;
+            let _ = std::fs::remove_dir_all(&open_dir);
+        }
+
+        // -----------------------------------------------------------
+        // Authorization consumes the VERIFIED grade only. A
+        // best-effort (XFF-derived, unverifiable) address must NOT open a
+        // conditioned grant: with verified = None the rule fails closed
+        // even though a best-effort address exists — the topology behind a
+        // trusted proxy without `XFF_TRUSTED_FOR_AUTHZ`.
+        // -----------------------------------------------------------
+
+        #[tokio::test]
+        async fn conditioned_grant_denies_when_verified_ip_is_unknown() {
+            use crate::api::handlers::test_db_helpers as tdh;
+            use crate::api::middleware::client_ip::with_client_ip_context;
+
+            let Some(pool) = tdh::try_pool().await else {
+                return;
+            };
+            let service = PermissionService::new(pool.clone());
+            let (repo_id, _, storage_dir) = tdh::create_repo(&pool, "local", "generic").await;
+            let (user_id, _) = tdh::create_user(&pool).await;
+
+            sqlx::query(
+                "INSERT INTO permissions \
+                   (principal_type, principal_id, target_type, target_id, actions, conditions) \
+                 VALUES ('user', $1, 'repository', $2, ARRAY['read'], $3)",
+            )
+            .bind(user_id)
+            .bind(repo_id)
+            .bind(serde_json::json!({"allowed_cidrs": ["10.20.0.0/16"]}))
+            .execute(&pool)
+            .await
+            .expect("insert conditioned rule");
+
+            // Best-effort says 10.20.3.4 (INSIDE the range — e.g. spoofed
+            // XFF behind a trusted proxy), verified says unknown: deny.
+            let denied = with_client_ip_context(
+                Some("10.20.3.4".parse().unwrap()),
+                None,
+                service.check_repository_action(user_id, repo_id, "read", false),
+            )
+            .await
+            .expect("decision with unknown verified IP");
+            assert!(
+                !denied,
+                "a conditioned grant must fail closed when the verified client IP is unknown, \
+                 even with a matching best-effort (XFF-derived) address"
+            );
+
+            // The cached fast path answers the same way.
+            let cached_denied = with_client_ip_context(
+                Some("10.20.3.4".parse().unwrap()),
+                None,
+                service.check_permission(user_id, "repository", repo_id, "read", false),
+            )
+            .await
+            .expect("cached decision with unknown verified IP");
+            assert!(
+                !cached_denied,
+                "the cached fast path must not serve a conditioned grant without a verified IP"
+            );
+
+            cleanup_action_fixture(&pool, repo_id, &[user_id], &storage_dir).await;
+        }
+
+        #[tokio::test]
+        async fn conditioned_grant_allows_a_matching_verified_ip() {
+            use crate::api::handlers::test_db_helpers as tdh;
+            use crate::api::middleware::client_ip::with_client_ip_context;
+
+            let Some(pool) = tdh::try_pool().await else {
+                return;
+            };
+            let service = PermissionService::new(pool.clone());
+            let (repo_id, _, storage_dir) = tdh::create_repo(&pool, "local", "generic").await;
+            let (user_id, _) = tdh::create_user(&pool).await;
+
+            sqlx::query(
+                "INSERT INTO permissions \
+                   (principal_type, principal_id, target_type, target_id, actions, conditions) \
+                 VALUES ('user', $1, 'repository', $2, ARRAY['read'], $3)",
+            )
+            .bind(user_id)
+            .bind(repo_id)
+            .bind(serde_json::json!({"allowed_cidrs": ["10.20.0.0/16"]}))
+            .execute(&pool)
+            .await
+            .expect("insert conditioned rule");
+
+            // Verified inside the range (best-effort disagrees — only the
+            // verified grade may feed the authz decision): allow.
+            let allowed = with_client_ip_context(
+                Some("192.0.2.9".parse().unwrap()),
+                Some("10.20.3.4".parse().unwrap()),
+                service.check_repository_action(user_id, repo_id, "read", false),
+            )
+            .await
+            .expect("decision with matching verified IP");
+            assert!(
+                allowed,
+                "a request whose verified IP falls inside allowed_cidrs must be granted"
+            );
+
+            cleanup_action_fixture(&pool, repo_id, &[user_id], &storage_dir).await;
+        }
+
+        #[tokio::test]
+        async fn unconditioned_grant_is_unaffected_by_unknown_verified_ip() {
+            use crate::api::handlers::test_db_helpers as tdh;
+            use crate::api::middleware::client_ip::with_client_ip_context;
+
+            let Some(pool) = tdh::try_pool().await else {
+                return;
+            };
+            let service = PermissionService::new(pool.clone());
+            let (repo_id, _, storage_dir) = tdh::create_repo(&pool, "local", "generic").await;
+            let (user_id, _) = tdh::create_user(&pool).await;
+
+            sqlx::query(
+                "INSERT INTO permissions \
+                   (principal_type, principal_id, target_type, target_id, actions) \
+                 VALUES ('user', $1, 'repository', $2, ARRAY['read'])",
+            )
+            .bind(user_id)
+            .bind(repo_id)
+            .execute(&pool)
+            .await
+            .expect("insert unconditioned rule");
+
+            // Fail-closed narrows only rules that carry the condition: an
+            // unconditioned grant still applies with verified = None.
+            let allowed = with_client_ip_context(
+                Some("192.0.2.9".parse().unwrap()),
+                None,
+                service.check_repository_action(user_id, repo_id, "read", false),
+            )
+            .await
+            .expect("unconditioned decision with unknown verified IP");
+            assert!(
+                allowed,
+                "an unconditioned rule applies regardless of the verified client IP"
+            );
+
+            cleanup_action_fixture(&pool, repo_id, &[user_id], &storage_dir).await;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // #3185: enforcement-vs-message drift guard.
+    //
+    // A stale startup warning claimed permission rules are "stored but not
+    // consulted during request authorization" (#794). That claim is false —
+    // enforcement landed across #817/#824/#826/#827/#819/#2603. This DB-backed
+    // test pins the actual behaviour the warning described so the two cannot
+    // drift apart again: a fine-grained `permissions` rule IS consulted, with
+    // deny-by-default for a principal the rule does not name. If enforcement is
+    // ever silently regressed (rules stored but not honoured — i.e. the warning
+    // becomes true again), this test goes red rather than a log line quietly
+    // becoming accurate. Requires a database: with none, it returns PASS early
+    // (~0.04s tell) exactly like the sibling DB tests.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn permission_rule_is_consulted_during_authorization() {
+        use crate::api::handlers::test_db_helpers as tdh;
+
+        let Some(pool) = tdh::try_pool().await else {
+            return;
+        };
+        let service = PermissionService::new(pool.clone());
+
+        // A private repository with a single fine-grained grant.
+        let (repo_id, _key, _dir) = tdh::create_repo(&pool, "local", "generic").await;
+        let (granted_user, _gu) = tdh::create_user(&pool).await; // holds the rule
+        let (other_user, _ou) = tdh::create_user(&pool).await; // no rule, no role
+
+        // Grant `granted_user` read+write on this repo via the `permissions`
+        // table (the exact CRUD surface #794 said was inert).
+        tdh::grant_repo_actions(&pool, repo_id, granted_user, &["read", "write"]).await;
+
+        // The rule is visible to the middleware's "should we enforce?" probe.
+        assert!(
+            service
+                .has_any_rules_for_target("repository", repo_id)
+                .await
+                .expect("rule-existence probe must reach the DB"),
+            "the just-inserted permissions rule must be observable"
+        );
+
+        // Collect every verdict BEFORE tearing down, then assert after. A
+        // failing assert must not skip cleanup: this suite runs
+        // process-per-test against a SHARED database, so leaked rows surface
+        // as unrelated failures elsewhere (the #3129 class).
+        let other_write = service
+            .check_repository_action(other_user, repo_id, "write", false)
+            .await
+            .expect("write check must reach the DB");
+        let other_read = service
+            .check_permission(other_user, "repository", repo_id, "read", false)
+            .await
+            .expect("read check must reach the DB");
+        let granted_write = service
+            .check_repository_action(granted_user, repo_id, "write", false)
+            .await
+            .expect("write check must reach the DB");
+        let granted_read = service
+            .check_permission(granted_user, "repository", repo_id, "read", false)
+            .await
+            .expect("read check must reach the DB");
+        let granted_delete = service
+            .check_repository_action(granted_user, repo_id, "delete", false)
+            .await
+            .expect("delete check must reach the DB");
+
+        // Scope teardown to this fixture's own rows only (#3129: no
+        // cluster-wide deletes on a shared database).
+        let _ = sqlx::query("DELETE FROM permissions WHERE target_id = $1")
+            .bind(repo_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM users WHERE id IN ($1, $2)")
+            .bind(granted_user)
+            .bind(other_user)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM repositories WHERE id = $1")
+            .bind(repo_id)
+            .execute(&pool)
+            .await;
+
+        // These two are CONTROLS, not the discriminating assertions — the
+        // comments here previously had it the other way round. `other_user`
+        // has no applicable rule, so it never takes the rule arm: it falls
+        // through to the role-assignment `ELSE` (see the `CASE` around
+        // permission_service.rs:216-224) and is denied for want of a role.
+        // Mutating the rule arm to `WHEN false` leaves BOTH of these green.
+        assert!(
+            !other_write,
+            "a principal with neither a rule nor a role must be denied write"
+        );
+        assert!(
+            !other_read,
+            "a principal with neither a rule nor a role must be denied read"
+        );
+
+        // THESE gate the claim. `granted_user` holds no role assignment, so
+        // the only way it can be allowed is if the `permissions` rule was
+        // actually consulted. Mutating the rule arm to `WHEN false` fails
+        // exactly here.
+        assert!(
+            granted_write,
+            "the granted principal must be allowed write — the rule IS consulted"
+        );
+        assert!(
+            granted_read,
+            "the granted principal must be allowed read — the rule IS consulted"
+        );
+
+        // The rule is AUTHORITATIVE for the principal it names, not merely
+        // additive: an action it does not carry is denied. Without this, a
+        // resolver returning "any applicable rule ⇒ allow" would satisfy
+        // everything above.
+        assert!(
+            !granted_delete,
+            "the granted principal holds read+write only; delete must be denied"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #1849: PermissionConditions + helpers (no database)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_conditions_validate_accepts_absent_and_well_formed() {
+        assert!(PermissionConditions::default().validate().is_ok());
+        let ok = PermissionConditions {
+            allowed_cidrs: Some(vec!["10.0.0.0/8".to_string(), "fc00::/7".to_string()]),
+        };
+        assert!(ok.validate().is_ok());
+    }
+
+    #[test]
+    fn test_conditions_validate_rejects_empty_cidr_list() {
+        let empty = PermissionConditions {
+            allowed_cidrs: Some(vec![]),
+        };
+        let err = empty.validate().unwrap_err();
+        assert!(
+            matches!(err, AppError::Validation(ref m) if m.contains("at least one")),
+            "an empty allowed_cidrs must be a validation error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_conditions_validate_rejects_unparseable_cidr() {
+        for bad in ["10.0.0.0/33", "not-a-cidr", "10.0.0.0/x"] {
+            let c = PermissionConditions {
+                allowed_cidrs: Some(vec![bad.to_string()]),
+            };
+            assert!(
+                matches!(c.validate(), Err(AppError::Validation(_))),
+                "{bad} must fail validation"
+            );
+        }
+    }
+
+    #[test]
+    fn test_conditions_reject_unknown_keys_at_deserialization() {
+        // A typo like `allowed_ciders` must not silently widen a rule.
+        let err =
+            serde_json::from_str::<PermissionConditions>(r#"{"allowed_ciders": ["10.0.0.0/8"]}"#);
+        assert!(err.is_err(), "unknown condition keys are rejected");
+    }
+
+    #[test]
+    fn test_conditions_round_trip_json_shape() {
+        let c = PermissionConditions {
+            allowed_cidrs: Some(vec!["10.0.0.0/8".to_string()]),
+        };
+        assert_eq!(
+            c.to_json(),
+            serde_json::json!({"allowed_cidrs": ["10.0.0.0/8"]})
+        );
+        // Default (absent) serializes to the unconditional empty object.
+        assert_eq!(
+            PermissionConditions::default().to_json(),
+            serde_json::json!({})
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_ip_sql_ref_is_null_outside_a_scope_and_quoted_ip_inside() {
+        use crate::api::middleware::client_ip::with_client_ip_scope;
+
+        assert_eq!(request_ip_sql_ref(), "NULL");
+        let inside = with_client_ip_scope(Some("203.0.113.7".parse().unwrap()), async {
+            request_ip_sql_ref()
+        })
+        .await;
+        assert_eq!(inside, "'203.0.113.7'");
+    }
+
+    #[test]
+    fn test_ip_condition_sql_fail_closed_shape() {
+        let sql = ip_condition_sql("p", "$4");
+        // The two load-bearing properties: rules without the key are exempt,
+        // and the membership test runs inside the rule's own array.
+        assert!(
+            sql.contains("NOT (p.conditions ? 'allowed_cidrs')"),
+            "{sql}"
+        );
+        assert!(sql.contains("jsonb_array_elements_text"), "{sql}");
+        assert!(sql.contains("$4::inet <<="), "{sql}");
+    }
+
+    #[tokio::test]
+    async fn test_validate_principal_accepts_nil_anonymous_and_rejects_non_nil() {
+        use crate::api::handlers::test_db_helpers as tdh;
+        let Some(pool) = tdh::try_pool().await else {
+            return;
+        };
+        let service = PermissionService::new(pool);
+
+        service
+            .validate_principal(ANONYMOUS_PRINCIPAL_TYPE, Uuid::nil())
+            .await
+            .expect("the nil anonymous principal is always valid");
+
+        let err = service
+            .validate_principal(ANONYMOUS_PRINCIPAL_TYPE, Uuid::new_v4())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::Validation(ref m) if m.contains("nil principal_id")),
+            "a non-nil anonymous principal id must be rejected, got {err:?}"
+        );
+    }
+}

@@ -1,0 +1,15 @@
+---
+# etcd is the distributed configuration store (DCS) for Patroni: leader election and
+# cluster state. Three members tolerate the loss of one.
+etcd_image: quay.io/coreos/etcd:v3.6.16
+# Inventory group whose hosts form the etcd cluster (odd number of members).
+etcd_group: ak_cluster
+etcd_name: "{{ inventory_hostname }}"
+etcd_listen_ip: "{{ ak_cluster_ip }}"
+etcd_client_port: 2379
+etcd_peer_port: 2380
+etcd_cluster_token: ak-etcd
+# Tuned for VMs on shared hardware: tolerates short stalls without needless leader elections.
+etcd_heartbeat_interval: 250
+etcd_election_timeout: 2500
+etcd_firewall_zone: "{{ ak_firewall_zone }}"

@@ -1,0 +1,24 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+[Unit]
+Description=OpenSearch for Artifact Keeper
+
+[Container]
+ContainerName=ak-opensearch
+Image={{ ak_standalone_opensearch_image }}
+Pull=never
+Network=artifact-keeper.network
+Ulimit=nofile=65536:65536
+Volume=ak-opensearch-data:/usr/share/opensearch/data
+Environment=discovery.type=single-node
+Environment="OPENSEARCH_JAVA_OPTS=-Xms{{ ak_standalone_opensearch_heap }} -Xmx{{ ak_standalone_opensearch_heap }}"
+# Security plugin disabled as in the upstream compose file; the port is not published.
+Environment=DISABLE_SECURITY_PLUGIN=true
+Environment=DISABLE_INSTALL_DEMO_CONFIG=true
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

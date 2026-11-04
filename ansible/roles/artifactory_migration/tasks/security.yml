@@ -1,0 +1,85 @@
+---
+# Migration of users, groups and permissions. Artifact Keeper 1.11.11 accepts
+# include_users/groups/permissions but never executes them, so this is done here.
+#   user        -> local user with the same e-mail. Passwords cannot be exported; every user
+#                  gets a one-time password and must change it at first login.
+#   group       -> group with the same members
+#   permission  -> one rule per repository and principal. READ->read, WRITE/ANNOTATE->write,
+#                  DELETE->delete, MANAGE->admin. Path patterns do not exist in Artifact Keeper
+#                  (see artifactory_migration_security_mode).
+
+- name: Import login tasks
+  ansible.builtin.import_tasks: login.yml
+
+- name: Read users of Artifactory
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_rt_url }}/ui/api/v1/access/api/ui/users"
+    headers: "{{ artifactory_migration_rt_ui }}"
+  register: artifactory_migration_src_users
+  # The UI API of Artifactory occasionally stalls on single requests; retry instead of waiting long.
+  until: artifactory_migration_src_users.status | default(0) == 200
+  retries: 4
+  delay: 5
+
+- name: Read user details (e-mail, groups)
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_rt_url }}/ui/api/v1/access/api/ui/users/{{ item }}"
+    headers: "{{ artifactory_migration_rt_ui }}"
+  loop: >-
+    {{ artifactory_migration_src_users.json.users | map(attribute='username')
+       | reject('in', ['admin', 'anonymous', '_internal']) | list }}
+  register: artifactory_migration_src_user_details
+  # The UI API of Artifactory occasionally stalls on single requests; retry instead of waiting long.
+  until: artifactory_migration_src_user_details.status | default(0) == 200
+  retries: 4
+  delay: 5
+
+- name: Read groups and permission targets of Artifactory
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_rt_url }}/ui/api/v1/access/api/ui/{{ item }}"
+    headers: "{{ artifactory_migration_rt_ui }}"
+  loop:
+    - groups
+    - permissions
+  register: artifactory_migration_src_lists
+  # The UI API of Artifactory occasionally stalls on single requests; retry instead of waiting long.
+  until: artifactory_migration_src_lists.status | default(0) == 200
+  retries: 4
+  delay: 5
+
+- name: Read permission target details
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_rt_url }}/ui/api/v1/access/api/ui/permissions/{{ item | urlencode }}"
+    headers: "{{ artifactory_migration_rt_ui }}"
+  # Built-in targets of Artifactory that grant access to everything.
+  loop: >-
+    {{ artifactory_migration_src_lists.results[1].json.permissions | map(attribute='name')
+       | reject('in', ['Anything', 'Any Remote']) | list }}
+  register: artifactory_migration_src_permissions
+  # The UI API of Artifactory occasionally stalls on single requests; retry instead of waiting long.
+  until: artifactory_migration_src_permissions.status | default(0) == 200
+  retries: 4
+  delay: 5
+
+- name: Read users, groups, repositories and rules of Artifact Keeper
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_ak_url }}/api/v1/{{ item }}?per_page=500"
+    headers: "{{ artifactory_migration_ak_auth }}"
+  loop:
+    - users
+    - groups
+    - repositories
+    - permissions
+  register: artifactory_migration_target
+
+- name: Remember what exists in Artifact Keeper
+  ansible.builtin.set_fact:
+    artifactory_migration_ak_users: "{{ artifactory_migration_target.results[0].json['items'] | items2dict(key_name='username', value_name='id') }}"
+    artifactory_migration_ak_groups: "{{ artifactory_migration_target.results[1].json['items'] | items2dict(key_name='name', value_name='id') }}"
+    artifactory_migration_ak_repos: "{{ artifactory_migration_target.results[2].json['items'] | items2dict(key_name='key', value_name='id') }}"
+
+- name: Import user and group tasks
+  ansible.builtin.import_tasks: security_principals.yml
+
+- name: Import permission tasks
+  ansible.builtin.import_tasks: security_permissions.yml

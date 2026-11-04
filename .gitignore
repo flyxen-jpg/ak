@@ -1,0 +1,16 @@
+# Zugangsdaten / Schluessel
+lab/ha/secrets.env
+lab/ha/s3.env
+vm/id_ed25519
+vm/id_ed25519.pub
+vm/credentials.txt
+vm/known_hosts
+**/.env
+!**/.env.example
+
+# VMs, ISOs, grosse Downloads
+iso/
+vm/*/
+upstream/artifactory-oss/bundle.tar.gz
+upstream/artifactory-oss/artifactory-oss-*/bin/
+upstream/artifactory-oss/artifactory-oss-*/third-party/

@@ -1,0 +1,86 @@
+# =============================================================================
+# JFrog Artifactory OSS (Community Edition) - Podman-optimierte Compose-Datei
+# =============================================================================
+# Basis: offizielles JFrog-Compose-Bundle jfrog-artifactory-oss-7.161.26-compose.tar.gz
+#        (templates/docker-compose-volumes.yaml + docker-compose-postgres-17-6v.yaml)
+#
+# Aenderungen gegenueber dem Original (fuer rootless Podman + SELinux):
+#   * Kein config.sh / ROOT_DATA_DIR noetig: benannte Volumes, die Compose selbst
+#     anlegt (Original: `external: true` -> manuelles `docker volume create`).
+#     Podman kopiert beim ersten Mount Inhalt + Owner (uid 1030) aus dem Image
+#     in das leere Volume, daher kein chown auf dem Host noetig.
+#   * Vollqualifizierte Image-Namen, `version:` entfernt (obsolet).
+#   * x-podman.in_pod=false (kein gemeinsamer Pod, eigene Healthchecks).
+#   * Healthchecks + depends_on: service_healthy (Original startet Artifactory
+#     ohne auf die DB zu warten).
+#   * Postgres-Port 5432 wird nicht mehr auf allen Host-Interfaces gepublisht.
+#   * ulimits: nproc entfernt (rootless darf das Hard-Limit des Hosts nicht
+#     ueberschreiten -> "setrlimit: operation not permitted"); nofile bleibt.
+#   * logging: json-file entfernt (Podman nutzt journald/k8s-file; `podman logs`
+#     funktioniert weiterhin).
+#   * Passwort und Java-Heap kommen aus .env; Heap begrenzt fuer kleine VMs.
+#   * JDBC-URL nutzt den Service-Namen "postgres" (DNS im Podman-Netz).
+#
+# Fuer JFrog Container Registry (JCR) statt OSS: ARTIFACTORY_EDITION=artifactory-jcr
+# =============================================================================
+
+x-podman:
+  in_pod: false
+
+services:
+  postgres:
+    image: ${DOCKER_REGISTRY:-releases-docker.jfrog.io}/postgres:17.10-alpine
+    container_name: artifactory-postgresql
+    environment:
+      POSTGRES_DB: artifactory
+      POSTGRES_USER: artifactory
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD in .env setzen}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U artifactory -d artifactory"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    ulimits:
+      nofile:
+        soft: 32000
+        hard: 40000
+    restart: always
+
+  artifactory:
+    image: ${DOCKER_REGISTRY:-releases-docker.jfrog.io}/jfrog/${ARTIFACTORY_EDITION:-artifactory-oss}:${ARTIFACTORY_VERSION:-7.161.26}
+    container_name: artifactory
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      JF_SHARED_DATABASE_TYPE: postgresql
+      JF_SHARED_DATABASE_DRIVER: org.postgresql.Driver
+      JF_SHARED_DATABASE_URL: jdbc:postgresql://postgres:5432/artifactory
+      JF_SHARED_DATABASE_USERNAME: artifactory
+      JF_SHARED_DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+      JF_SHARED_EXTRAJAVAOPTS: ${ARTIFACTORY_JAVA_OPTS:--Xms512m -Xmx2g}
+      JF_ROUTER_ENTRYPOINTS_EXTERNALPORT: ${JF_ROUTER_ENTRYPOINTS_EXTERNALPORT:-8082}
+    ports:
+      - "${JF_ROUTER_ENTRYPOINTS_EXTERNALPORT:-8082}:${JF_ROUTER_ENTRYPOINTS_EXTERNALPORT:-8082}"  # Router / UI / REST
+      - "8081:8081"  # direkter Artifactory-Zugriff
+    volumes:
+      - artifactory_data:/var/opt/jfrog/artifactory
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8082/router/api/v1/system/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 180s
+      retries: 10
+    ulimits:
+      nofile:
+        soft: 32000
+        hard: 40000
+    restart: always
+
+volumes:
+  artifactory_data:
+  postgres_data:

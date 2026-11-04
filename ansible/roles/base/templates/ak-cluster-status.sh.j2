@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+#
+# One-screen health overview of the whole cluster. Read-only (HTTP queries only).
+# Live view: watch -n2 -c -t {{ base_status_script }}
+NODES=({% for h in groups[base_hosts_group] %}"{{ h }}:{{ hostvars[h]['ak_cluster_ip'] }}:{{ 'app' if h in groups['ak_app'] | default([]) else 'quorum' }}" {% endfor %})
+VIP={{ ak_vip }}
+c()  { curl -s --max-time 2 "$@"; }
+st() { if [ "$1" = "$2" ]; then printf '\033[32m%-9s\033[0m' "$1"; else printf '\033[31m%-9s\033[0m' "${1:-DOWN}"; fi; }
+
+printf '\033[1mArtifact Keeper cluster  -  %s\033[0m\n\n' "$(date +%T)"
+printf '\033[1m%-12s %-9s %-9s %-9s %-9s %-9s %-9s\033[0m\n' NODE PATRONI AK-READY AK-HEALTH ETCD GARAGE OPENSRCH
+for n in "${NODES[@]}"; do
+  IFS=: read -r name ip kind <<<"$n"
+  et=$(c "http://$ip:2379/health" | jq -r '.health // empty' 2>/dev/null)
+  ga=$(c -o /dev/null -w '%{http_code}' "http://$ip:3903/health")
+  os=$(c -o /dev/null -w '%{http_code}' "http://$ip:9200/")
+  printf '%-12s ' "$name"
+  if [ "$kind" = app ]; then
+    role=$(c "http://$ip:8008/patroni" | jq -r '.role // empty' 2>/dev/null)
+    rdy=$(c -o /dev/null -w '%{http_code}' "http://$ip:8080/readyz")
+    hl=$(c "http://$ip:8080/health" | jq -r '.status // empty' 2>/dev/null)
+    if [ -n "$role" ]; then printf '\033[32m%-9s\033[0m ' "$role"; else st "" x; printf ' '; fi
+    st "$rdy" 200; printf ' '; st "$hl" healthy; printf ' '
+  else
+    printf '%-9s %-9s %-9s ' - - -
+  fi
+  st "$et" true; printf ' '; st "$ga" 200; printf ' '; st "$os" 200; echo
+done
+echo
+H=$(c -sI "http://$VIP/readyz")
+code=$(echo "$H" | awk 'NR==1{print $2}')
+printf 'VIP %s: /readyz ' "$VIP"; st "$code" 200
+printf '  holder: \033[1m%s\033[0m  served by: %s\n' \
+  "$(echo "$H" | awk -F': ' 'tolower($1)=="x-served-by"{gsub("\r","");print $2}')" \
+  "$(echo "$H" | awk -F': ' 'tolower($1)=="x-ak-backend"{gsub("\r","");print $2}')"
+first_ip=$(echo "${NODES[0]}" | cut -d: -f2)
+printf 'OpenSearch: %s\n' "$(c "http://$first_ip:9200/_cluster/health" | jq -r '"\(.status), \(.number_of_nodes) nodes"' 2>/dev/null)"
+for n in "${NODES[@]}"; do
+  IFS=: read -r name ip kind <<<"$n"
+  [ "$kind" = app ] || continue
+  cl=$(c "http://$ip:8008/cluster") && [ -n "$cl" ] && break
+done
+printf 'Patroni:    %s\n' "$(echo "$cl" | jq -r '.members // [] | map("\(.name)=\(.role)/\(.state) TL\(.timeline // "-") lag=\(.lag // 0)") | join("   ")' 2>/dev/null)"
+for n in "${NODES[@]}"; do
+  IFS=: read -r name ip kind <<<"$n"
+  [ "$kind" = app ] || continue
+  printf 'HAProxy %-8s ' "$name:"
+  c "http://$ip:8404/;csv" | awk -F, '$1!~/^#/ && $1!="stats" && $2!="FRONTEND" && $2!="BACKEND" {printf "%s/%s=%s ", $1, $2, $18}'; echo
+done

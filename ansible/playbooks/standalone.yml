@@ -1,0 +1,31 @@
+---
+# Single host installation: Artifact Keeper and (optionally) Artifactory OSS on one plain
+# Rocky Linux 10 minimal machine with NAT networking only.
+#   ansible-playbook -i inventories/standalone/hosts.yml playbooks/standalone.yml
+# Runs on the host itself (see the inventory); no other machine and no SSH setup needed.
+- name: Install Artifact Keeper and Artifactory OSS on one host
+  hosts: standalone
+  gather_facts: true
+  vars:
+    # Lets the Artifact Keeper backend reach Artifactory (and only Artifactory) for migrations.
+    ak_standalone_extra_networks: "{{ ['artifactory'] if standalone_artifactory_enabled | bool else [] }}"
+    ak_standalone_ssrf_allow_private_cidrs: >-
+      {{ (artifactory_oss_ip | default('10.89.41.10')) ~ '/32' if standalone_artifactory_enabled | bool else '' }}
+  roles:
+    - role: standalone_host
+      tags: [standalone_host]
+    # Artifactory first: its network must exist before the backend of Artifact Keeper joins it.
+    - role: artifactory_oss
+      when: standalone_artifactory_enabled | bool
+      tags: [artifactory]
+    - role: ak_standalone
+      tags: [artifact_keeper]
+  post_tasks:
+    - name: Show access information
+      ansible.builtin.debug:
+        msg:
+          - "Artifact Keeper: {{ ak_standalone_external_url }} (inside the VM: http://localhost:30080), user admin"
+          - "Artifactory:     http://localhost:8082 (if enabled), user admin"
+          - "Passwords: ansible-vault view inventories/standalone/group_vars/all/vault.yml"
+          - "NAT only: forward host ports 30080 and 8082 to the VM to open the web interfaces from the host."
+      tags: [always]

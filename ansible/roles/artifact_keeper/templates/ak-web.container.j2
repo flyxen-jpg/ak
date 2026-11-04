@@ -1,0 +1,22 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+[Unit]
+Description=Artifact Keeper web UI {{ artifact_keeper_web_version }}
+
+[Container]
+ContainerName=ak-web
+Image={{ artifact_keeper_web_image }}
+Pull=never
+Network=host
+# Server-side rendering talks to the local backend directly.
+Environment=BACKEND_URL=http://{{ artifact_keeper_listen_ip }}:{{ artifact_keeper_backend_port }}
+Environment=PORT={{ artifact_keeper_web_port }}
+# With host networking the server would otherwise bind to the host name only.
+Environment=HOSTNAME=0.0.0.0
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

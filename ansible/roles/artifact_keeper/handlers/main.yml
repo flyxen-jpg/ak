@@ -1,0 +1,62 @@
+---
+# Restart sequence for one node. All handlers listen to "Restart artifact keeper" and run in
+# the order written here: drain -> restart -> wait for /readyz -> back into the pool.
+# Combined with "serial: 1" in the playbook, the cluster keeps serving during the change.
+
+- name: Drain node in all HAProxy instances
+  become: true
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      echo "set server ak_api/{{ inventory_hostname }} state drain;
+      set server ak_web/{{ inventory_hostname }} state drain" | socat stdio {{ artifact_keeper_haproxy_socket }}
+  delegate_to: "{{ item }}"
+  loop: "{{ groups[artifact_keeper_haproxy_group] }}"
+  when: artifact_keeper_drain_on_restart
+  changed_when: true
+  failed_when: false
+  listen: Restart artifact keeper
+
+- name: Wait for running requests to finish
+  ansible.builtin.pause:
+    seconds: "{{ artifact_keeper_drain_wait }}"
+  when: artifact_keeper_drain_on_restart
+  listen: Restart artifact keeper
+
+- name: Restart backend and web containers
+  become: true
+  become_user: "{{ podman_user }}"
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    scope: user
+    state: restarted
+    daemon_reload: true
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ podman_user_uid }}"
+  loop:
+    - ak-backend.service
+    - ak-web.service
+  listen: Restart artifact keeper
+
+- name: Wait until the restarted backend is ready
+  ansible.builtin.uri:
+    url: "http://{{ artifact_keeper_listen_ip }}:{{ artifact_keeper_backend_port }}/readyz"
+  register: artifact_keeper_restart_ready
+  until: artifact_keeper_restart_ready.status == 200
+  retries: 60
+  delay: 5
+  listen: Restart artifact keeper
+
+- name: Return node to all HAProxy instances
+  become: true
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      echo "set server ak_api/{{ inventory_hostname }} state ready;
+      set server ak_web/{{ inventory_hostname }} state ready" | socat stdio {{ artifact_keeper_haproxy_socket }}
+  delegate_to: "{{ item }}"
+  loop: "{{ groups[artifact_keeper_haproxy_group] }}"
+  when: artifact_keeper_drain_on_restart
+  changed_when: true
+  failed_when: false
+  listen: Restart artifact keeper

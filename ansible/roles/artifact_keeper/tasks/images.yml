@@ -1,0 +1,12 @@
+---
+# Separate entry point so playbooks can fetch the images on all nodes in parallel before
+# the serial rollout. Also imported by main.yml (no-op when the images are present).
+- name: Provide Artifact Keeper images
+  ansible.builtin.include_role:
+    name: podman
+    tasks_from: image.yml
+  vars:
+    podman_image: "{{ item }}"
+  loop:
+    - "{{ artifact_keeper_backend_image }}"
+    - "{{ artifact_keeper_web_image }}"

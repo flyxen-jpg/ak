@@ -1,0 +1,30 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+[Unit]
+Description=Artifact Keeper backend {{ artifact_keeper_version }}
+
+[Container]
+ContainerName=ak-backend
+Image={{ artifact_keeper_backend_image }}
+Pull=never
+Network=host
+EnvironmentFile={{ artifact_keeper_config_dir }}/backend.env
+# Local scratch only (temp files, plugins); no artifacts are stored here.
+Volume=ak-scratch:/data
+# Exec form (JSON array): the image has curl but no shell, and a plain string would be run
+# via /bin/sh -c - the check would always fail and HealthOnFailure would kill a healthy backend.
+# No outer quotes and no spaces: Quadlet would pass quotes through literally.
+HealthCmd=["curl","-fsS","-m","4","http://localhost:{{ artifact_keeper_backend_port }}/livez"]
+HealthInterval=15s
+HealthTimeout=5s
+HealthStartPeriod=30s
+HealthRetries=3
+# Restart the container when the health check fails permanently.
+HealthOnFailure=kill
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

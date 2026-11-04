@@ -1,0 +1,60 @@
+# Optionale Dependency-Track-Integration (~4 GiB RAM zusaetzlich).
+# Start:  podman compose -f compose.yaml -f compose.dtrack.yaml up -d
+#         (danach: podman restart artifact-keeper-backend)
+services:
+  dependency-track-apiserver:
+    image: docker.io/dependencytrack/apiserver:4.14.3
+    container_name: artifact-keeper-dtrack-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ALPINE_DATABASE_MODE: external
+      ALPINE_DATABASE_URL: jdbc:postgresql://postgres:5432/dependency_track
+      ALPINE_DATABASE_DRIVER: org.postgresql.Driver
+      ALPINE_DATABASE_USERNAME: ${POSTGRES_USER:-registry}
+      ALPINE_DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+      ALPINE_DATA_DIRECTORY: /data
+      ALPINE_ENFORCE_AUTHENTICATION: "true"
+    volumes:
+      - dtrack_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/version || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 10
+    restart: always
+
+  dtrack-init:
+    image: docker.io/library/alpine:3.24
+    container_name: artifact-keeper-dtrack-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dependency-track-apiserver:
+        condition: service_healthy
+    volumes:
+      - ./docker/init-dtrack.sh:/init-dtrack.sh:ro,Z
+      - shared_config:/shared
+    environment:
+      DTRACK_INIT_KEY_OWNER: "1001:0"
+      DEPENDENCY_TRACK_ADMIN_PASSWORD: ${DEPENDENCY_TRACK_ADMIN_PASSWORD:?DEPENDENCY_TRACK_ADMIN_PASSWORD in .env setzen}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        apk add --no-cache curl jq >/dev/null 2>&1
+        exec /bin/sh /init-dtrack.sh
+    restart: "no"
+
+  # Kein depends_on auf dtrack-init (siehe compose.yaml: --requires auf beendete
+  # Container blockiert den Start). Nach dem ersten Lauf von dtrack-init einmalig
+  # `podman restart artifact-keeper-backend` ausfuehren, damit der API-Key gelesen wird.
+  backend:
+    environment:
+      DEPENDENCY_TRACK_ENABLED: "true"
+      DEPENDENCY_TRACK_URL: http://dependency-track-apiserver:8080
+      DEPENDENCY_TRACK_API_KEY_FILE: /shared/dtrack-api-key
+
+volumes:
+  dtrack_data:

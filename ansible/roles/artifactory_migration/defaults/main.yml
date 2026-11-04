@@ -1,0 +1,62 @@
+---
+# Migration Artifactory -> Artifact Keeper through the Artifact Keeper migration API, plus
+# verification and the migration of users, groups and permissions (which Artifact Keeper
+# 1.11.11 accepts as options but never executes).
+#
+# All calls run on the host in group "migration_runner"; it must reach both web interfaces.
+
+# Artifact Keeper as seen from the runner.
+artifactory_migration_ak_url: "http://127.0.0.1:30080"
+artifactory_migration_ak_user: admin
+# artifactory_migration_ak_password: from the vault (admin password of Artifact Keeper)
+
+# Artifactory as seen from the runner (seed data, manifest, security export).
+artifactory_migration_rt_url: "http://127.0.0.1:8082"
+artifactory_migration_rt_user: admin
+# artifactory_migration_rt_password: from the vault
+
+# Artifactory as seen from the Artifact Keeper BACKEND. The backend fetches the artifacts
+# itself, so this address must be reachable from the backend container and be allowed by its
+# SSRF protection (AK_SSRF_ALLOW_PRIVATE_CIDRS).
+artifactory_migration_source_url: "http://10.89.41.10:8082/artifactory"
+
+artifactory_migration_connection_name: artifactory
+artifactory_migration_repos:
+  - maven-releases
+  - maven-snapshots
+  - gradle-plugins
+  - generic-files
+  - maven-central
+  - maven-all
+# Package types (as reported by the source) that Artifact Keeper 1.11.11 cannot migrate.
+artifactory_migration_unsupported_types:
+  - gradle
+  - Gradle
+artifactory_migration_concurrent_transfers: 4
+# Maximum wait for one migration job (seconds).
+artifactory_migration_timeout: 3600
+
+# Verification: every file of the source is downloaded from Artifact Keeper and compared by
+# SHA-256. Known, documented differences are excluded and reported separately.
+artifactory_migration_verify_dir: /var/tmp/ak-migration-verify
+# Gradle repositories cannot be migrated; Artifact Keeper regenerates maven-metadata.xml.
+artifactory_migration_verify_skip_repos:
+  - gradle-plugins
+artifactory_migration_verify_skip_names:
+  - maven-metadata.xml
+
+# Security migration. strict: rules with include/exclude path patterns are skipped
+# (Artifact Keeper has no path patterns). broad: they are granted for the whole repository.
+artifactory_migration_security_mode: strict
+# Generated one-time passwords of migrated users (readable by root only).
+artifactory_migration_password_file: /root/ak-migrated-users.txt
+
+# Test data (lab only, playbooks/artifactory_seed.yml).
+artifactory_migration_seed_dir: /var/tmp/artifactory-seed
+artifactory_migration_seed_users:
+  - name: alice
+    group: developers
+  - name: bob
+    group: developers
+  - name: carol
+    group: release-managers

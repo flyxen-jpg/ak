@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  author: Artifact Keeper lab
+  description: Garage S3 object storage node as rootless Podman Quadlet
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: EL
+      versions:
+        - "10"
+dependencies:
+  - role: podman

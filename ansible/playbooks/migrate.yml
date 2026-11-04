@@ -1,0 +1,49 @@
+---
+# Migration Artifactory -> Artifact Keeper in three steps (each can be run alone by tag):
+#   artifacts  built-in migration job of Artifact Keeper; first run full, later runs incremental
+#   verify     every source file downloaded from Artifact Keeper and compared by SHA-256
+#   security   users, groups and permissions (not done by Artifact Keeper itself)
+#
+#   ansible-playbook -i inventories/<env>/hosts.yml playbooks/migrate.yml
+#   ansible-playbook -i inventories/<env>/hosts.yml playbooks/migrate.yml --tags artifacts,verify
+- name: Migrate artifacts
+  hosts: migration_runner
+  gather_facts: false
+  # The UI API of Artifactory answers the first login only after 30 to 60 seconds.
+  module_defaults:
+    ansible.builtin.uri:
+      timeout: 90
+  tags: [artifacts]
+  tasks:
+    - name: Run the migration job
+      ansible.builtin.import_role:
+        name: artifactory_migration
+        tasks_from: migrate.yml
+
+- name: Verify migrated artifacts
+  hosts: migration_runner
+  gather_facts: false
+  # The UI API of Artifactory answers the first login only after 30 to 60 seconds.
+  module_defaults:
+    ansible.builtin.uri:
+      timeout: 90
+  tags: [verify]
+  tasks:
+    - name: Compare every file by checksum
+      ansible.builtin.import_role:
+        name: artifactory_migration
+        tasks_from: verify.yml
+
+- name: Migrate users, groups and permissions
+  hosts: migration_runner
+  gather_facts: false
+  # The UI API of Artifactory answers the first login only after 30 to 60 seconds.
+  module_defaults:
+    ansible.builtin.uri:
+      timeout: 90
+  tags: [security]
+  tasks:
+    - name: Transfer security settings
+      ansible.builtin.import_role:
+        name: artifactory_migration
+        tasks_from: security.yml

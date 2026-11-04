@@ -1,0 +1,16 @@
+---
+# Test data for a migration trial (lab only): repositories of every type, artifacts with
+# properties, a remote cache, users, groups and permission targets in Artifactory OSS.
+#   ansible-playbook -i inventories/<env>/hosts.yml playbooks/artifactory_seed.yml
+- name: Fill Artifactory with test data
+  hosts: migration_runner
+  gather_facts: false
+  # The UI API of Artifactory answers the first login only after 30 to 60 seconds.
+  module_defaults:
+    ansible.builtin.uri:
+      timeout: 90
+  tasks:
+    - name: Create test data
+      ansible.builtin.import_role:
+        name: artifactory_migration
+        tasks_from: seed.yml

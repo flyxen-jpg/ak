@@ -1,0 +1,110 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+#
+# Identical on all application nodes; the node holding the VIP serves the clients.
+#   :{{ haproxy_http_port }}    Artifact Keeper (API/formats -> backend, everything else -> web UI)
+#   :{{ haproxy_postgres_port }}  PostgreSQL, current Patroni primary only (health: Patroni REST /primary)
+#   :{{ haproxy_s3_port }}  Garage S3 (all nodes)
+#   :{{ haproxy_opensearch_port }}  OpenSearch (all nodes)
+#   :{{ haproxy_stats_port }}  statistics page
+
+global
+    log /dev/log local0
+    maxconn 4000
+    user haproxy
+    group haproxy
+    daemon
+    # Admin socket: lets the playbooks drain a node before restarting it (zero downtime).
+    stats socket {{ haproxy_admin_socket }} mode 660 level admin
+
+defaults
+    log global
+    option dontlognull
+    retries 2
+    option redispatch
+    timeout connect 5s
+    timeout client {{ haproxy_timeout_client }}
+    timeout server {{ haproxy_timeout_server }}
+    timeout http-request 30s
+    timeout check 3s
+
+listen stats
+    bind *:{{ haproxy_stats_port }}
+    mode http
+    stats enable
+    stats uri /
+    stats refresh 5s
+    stats show-node
+
+#--------------------------- Artifact Keeper --------------------------
+frontend ak
+    bind *:{{ haproxy_http_port }}
+    mode http
+    option httplog
+    option forwardfor
+    http-request set-header X-Forwarded-Proto http
+    # Diagnostics: which HAProxy (= VIP holder) and which backend answered.
+    http-response set-header X-Served-By %[hostname]
+    http-response set-header X-AK-Backend %s
+{% for paths in haproxy_backend_paths %}
+    acl is_backend path_beg {{ paths }}
+{% endfor %}
+    use_backend ak_api if is_backend
+    default_backend ak_web
+
+backend ak_api
+    mode http
+    balance roundrobin
+    # /readyz is 200 only when database and storage are reachable.
+    option httpchk GET /readyz
+    http-check expect status 200
+    default-server inter 2s fall 2 rise 2 slowstart 10s
+{% for h in groups[haproxy_app_group] %}
+    server {{ h }} {{ hostvars[h]['ak_cluster_ip'] }}:{{ haproxy_ak_backend_port }} check
+{% endfor %}
+
+backend ak_web
+    mode http
+    balance roundrobin
+    option httpchk GET /
+    http-check expect status 200-399
+    default-server inter 3s fall 2 rise 2
+{% for h in groups[haproxy_app_group] %}
+    server {{ h }} {{ hostvars[h]['ak_cluster_ip'] }}:{{ haproxy_ak_web_port }} check
+{% endfor %}
+
+#--------------------------- PostgreSQL (Patroni) --------------------
+listen postgres
+    bind *:{{ haproxy_postgres_port }}
+    mode tcp
+    option httpchk OPTIONS /primary
+    http-check expect status 200
+    # Cut connections to a demoted primary immediately.
+    default-server inter 2s fall 2 rise 2 on-marked-down shutdown-sessions
+{% for h in groups[haproxy_app_group] %}
+    server {{ h }} {{ hostvars[h]['ak_cluster_ip'] }}:{{ haproxy_pg_port }} maxconn 150 check port {{ haproxy_patroni_rest_port }}
+{% endfor %}
+
+#--------------------------- Garage S3 -------------------------------
+listen s3
+    bind *:{{ haproxy_s3_port }}
+    mode http
+    balance leastconn
+    option httpchk GET /health
+    http-check expect status 200
+    default-server inter 3s fall 2 rise 2
+{% for h in groups[haproxy_storage_group] %}
+    server {{ h }} {{ hostvars[h]['ak_cluster_ip'] }}:{{ haproxy_s3_upstream_port }} check port {{ haproxy_s3_health_port }}
+{% endfor %}
+
+#--------------------------- OpenSearch ------------------------------
+listen opensearch
+    bind *:{{ haproxy_opensearch_port }}
+    mode http
+    balance roundrobin
+    option httpchk GET /_cluster/health
+    http-check expect status 200
+    default-server inter 3s fall 2 rise 2
+{% for h in groups[haproxy_storage_group] %}
+    server {{ h }} {{ hostvars[h]['ak_cluster_ip'] }}:{{ haproxy_opensearch_upstream_port }} check
+{% endfor %}

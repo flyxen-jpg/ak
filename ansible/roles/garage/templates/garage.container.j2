@@ -1,0 +1,20 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+[Unit]
+Description=Garage S3 storage node ({{ garage_zone }})
+
+[Container]
+ContainerName=garage
+Image={{ garage_image }}
+Pull=never
+Network=host
+Volume={{ garage_config_dir }}/garage.toml:/etc/garage.toml:ro
+Volume=garage-meta:/var/lib/garage/meta
+Volume=garage-data:/var/lib/garage/data
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

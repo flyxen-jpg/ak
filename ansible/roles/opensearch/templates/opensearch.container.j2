@@ -1,0 +1,34 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+[Unit]
+Description=OpenSearch node {{ opensearch_node_name }}
+
+[Container]
+ContainerName=opensearch
+Image={{ opensearch_image }}
+Pull=never
+Network=host
+Ulimit=nofile={{ opensearch_nofile_limit }}:{{ opensearch_nofile_limit }}
+Volume=opensearch-data:/usr/share/opensearch/data
+Environment=cluster.name={{ opensearch_cluster_name }}
+Environment=node.name={{ opensearch_node_name }}
+Environment=network.bind_host=0.0.0.0
+Environment=network.publish_host={{ opensearch_listen_ip }}
+Environment=http.port={{ opensearch_http_port }}
+Environment=transport.port={{ opensearch_transport_port }}
+Environment=discovery.seed_hosts={% for h in groups[opensearch_group] %}{{ hostvars[h]['ak_cluster_ip'] }}:{{ opensearch_transport_port }}{{ ',' if not loop.last }}{% endfor %}
+
+Environment=cluster.initial_cluster_manager_nodes={% for h in groups[opensearch_group] %}{{ hostvars[h]['opensearch_node_name'] | default(h) }}{{ ',' if not loop.last }}{% endfor %}
+
+Environment="OPENSEARCH_JAVA_OPTS=-Xms{{ opensearch_heap_size }} -Xmx{{ opensearch_heap_size }}"
+# Security plugin disabled as in the upstream Artifact Keeper compose file; traffic stays in
+# the firewalled cluster network. Enable it (TLS + auth) for production, see docs.
+Environment=DISABLE_SECURITY_PLUGIN=true
+Environment=DISABLE_INSTALL_DEMO_CONFIG=true
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

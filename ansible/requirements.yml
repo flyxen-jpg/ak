@@ -1,0 +1,8 @@
+---
+# Collections required besides ansible-core. Pinned for reproducible (and offline) installs.
+#   online:  ansible-galaxy collection install -r requirements.yml -p collections
+#   offline: tools/install-control-node.sh /srv/ak-bundle
+collections:
+  # firewalld, sysctl, seboolean
+  - name: ansible.posix
+    version: 2.2.2

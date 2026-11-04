@@ -1,0 +1,96 @@
+---
+# Permission targets -> rules (one per repository and principal).
+# Artifactory permission targets contain repositories with include/exclude path patterns.
+# Artifact Keeper rules have no path patterns: in strict mode such rules are skipped (more
+# restrictive than before), in broad mode they apply to the whole repository (less restrictive).
+
+- name: Translate permission targets into rules
+  ansible.builtin.set_fact:
+    artifactory_migration_rules: >-
+      {%- set out = [] -%}
+      {%- for p in artifactory_migration_src_permissions.results -%}
+      {%- set art = p.json.resources.artifact | default({}) -%}
+      {%- for repo, t in (art.targets | default({})).items() -%}
+      {%- set inc = t.include_patterns | default(['**']) -%}
+      {%- set exc = t.exclude_patterns | default([]) -%}
+      {%- for kind in ['users', 'groups'] -%}
+      {%- for who, acts in ((art.actions | default({}))[kind] | default({})).items() -%}
+      {%- set _ = out.append({
+            'permission': p.item, 'repo': repo, 'kind': kind, 'who': who,
+            'actions': acts | select('in', artifactory_migration_action_map)
+                            | map('extract', artifactory_migration_action_map) | unique | sort | list,
+            'patterned': inc != ['**'] or exc | length > 0,
+            'patterns': 'include ' ~ inc | join(',') ~ ' exclude ' ~ exc | join(',') }) -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Resolve repositories and principals in Artifact Keeper
+  ansible.builtin.set_fact:
+    artifactory_migration_rules_resolved: >-
+      {%- set out = [] -%}
+      {%- for r in artifactory_migration_rules -%}
+      {%- set ids = artifactory_migration_ak_users if r.kind == 'users' else artifactory_migration_ak_groups -%}
+      {%- set _ = out.append(r | combine({
+            'repo_id': artifactory_migration_ak_repos.get(r.repo),
+            'principal_id': ids.get(r.who),
+            'principal_type': 'user' if r.kind == 'users' else 'group'})) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Report rules that cannot be migrated
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.permission }}/{{ item.repo }}/{{ item.who }}:
+      {{ 'repository not in Artifact Keeper' if item.repo_id is none
+         else 'principal not in Artifact Keeper' if item.principal_id is none
+         else 'path patterns (' ~ item.patterns ~ ') cannot be mapped, rule skipped (strict mode)' }}
+  loop: >-
+    {{ artifactory_migration_rules_resolved | selectattr('repo_id', 'none') | list
+       + artifactory_migration_rules_resolved | rejectattr('repo_id', 'none') | selectattr('principal_id', 'none') | list
+       + (artifactory_migration_rules_resolved | rejectattr('repo_id', 'none') | rejectattr('principal_id', 'none')
+          | selectattr('patterned') | list if artifactory_migration_security_mode == 'strict' else []) }}
+  loop_control:
+    label: "{{ item.permission }}/{{ item.repo }}/{{ item.who }}"
+
+- name: Read existing rules
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_ak_url }}/api/v1/permissions?per_page=500"
+    headers: "{{ artifactory_migration_ak_auth }}"
+  register: artifactory_migration_ak_rules
+
+- name: Create rules
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_ak_url }}/api/v1/permissions"
+    method: POST
+    headers: "{{ artifactory_migration_ak_auth }}"
+    body_format: json
+    body:
+      principal_type: "{{ item.principal_type }}"
+      principal_id: "{{ item.principal_id }}"
+      target_type: repository
+      target_id: "{{ item.repo_id }}"
+      actions: "{{ item.actions }}"
+    status_code: [200, 201]
+  loop: >-
+    {{ artifactory_migration_rules_resolved | rejectattr('repo_id', 'none') | rejectattr('principal_id', 'none')
+       | rejectattr('patterned', 'equalto', artifactory_migration_security_mode == 'strict') | list
+       if artifactory_migration_security_mode == 'strict'
+       else artifactory_migration_rules_resolved | rejectattr('repo_id', 'none') | rejectattr('principal_id', 'none') | list }}
+  loop_control:
+    label: "{{ item.principal_type }} {{ item.who }} -> {{ item.repo }} {{ item.actions }}"
+  when: >-
+    artifactory_migration_ak_rules.json['items'] | default([])
+    | selectattr('principal_id', 'equalto', item.principal_id)
+    | selectattr('target_id', 'equalto', item.repo_id) | list | length == 0
+  changed_when: true
+
+- name: Summarise security migration
+  ansible.builtin.debug:
+    msg:
+      - "Users in Artifact Keeper: {{ artifactory_migration_ak_users | dict2items | map(attribute='key') | list }}"
+      - "Groups in Artifact Keeper: {{ artifactory_migration_ak_groups | dict2items | map(attribute='key') | list }}"
+      - "Rules from Artifactory: {{ artifactory_migration_rules | length }}, mode {{ artifactory_migration_security_mode }}"
+      - "One-time passwords of new users: {{ artifactory_migration_password_file }} (root only)"

@@ -1,0 +1,72 @@
+---
+# Rootless Podman with systemd Quadlet.
+# Why Quadlet instead of podman-compose: containers become regular systemd units (ordering,
+# restart policy, journald logging, start at boot) and no extra package from EPEL is needed.
+
+- name: Install Podman
+  become: true
+  ansible.builtin.dnf:
+    name: "{{ podman_packages }}"
+    state: present
+
+- name: Create container service account
+  become: true
+  ansible.builtin.user:
+    name: "{{ podman_user }}"
+    home: "{{ podman_user_home }}"
+    shell: "{{ podman_user_shell }}"
+    comment: Rootless containers for Artifact Keeper
+    create_home: true
+    state: present
+
+# Ansible's working directory for tasks that run as the service account (become_user).
+- name: Create Ansible temp directory for the service account
+  become: true
+  ansible.builtin.file:
+    path: "{{ podman_user_home }}/.ansible/tmp"
+    state: directory
+    owner: "{{ podman_user }}"
+    group: "{{ podman_user }}"
+    mode: "0700"
+
+- name: Read UID of the service account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ podman_user }}"
+
+- name: Remember UID for Quadlet paths and the user systemd instance
+  ansible.builtin.set_fact:
+    podman_user_uid: "{{ ansible_facts['getent_passwd'][podman_user][1] }}"
+    cacheable: true
+
+# Rootless containers need subordinate UID/GID ranges. useradd allocates them on RHEL 10,
+# but accounts created by other means (LDAP, older tools) may lack them.
+- name: Check subordinate ID ranges of the service account
+  ansible.builtin.command: grep -q "^{{ podman_user }}:" {{ item }}
+  changed_when: false
+  loop:
+    - /etc/subuid
+    - /etc/subgid
+
+# Lingering starts the user's systemd instance at boot without a login session,
+# so the containers come up after a reboot.
+- name: Enable lingering for the service account
+  become: true
+  ansible.builtin.command: loginctl enable-linger {{ podman_user }}
+  args:
+    creates: "/var/lib/systemd/linger/{{ podman_user }}"
+
+- name: Start the user systemd instance
+  become: true
+  ansible.builtin.systemd_service:
+    name: "user@{{ podman_user_uid }}.service"
+    state: started
+
+- name: Create Quadlet directory
+  become: true
+  ansible.builtin.file:
+    path: "{{ podman_quadlet_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"

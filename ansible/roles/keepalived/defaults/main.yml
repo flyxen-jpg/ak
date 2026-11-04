@@ -1,0 +1,28 @@
+---
+# keepalived moves the virtual IP (VIP) between the HAProxy nodes via VRRP.
+keepalived_packages:
+  - keepalived
+  - iputils
+keepalived_group: ak_app
+keepalived_vip: "{{ ak_vip }}"
+keepalived_vip_prefix: "{{ ak_cluster_network.split('/')[1] }}"
+# Detected by the base role from ak_cluster_ip.
+keepalived_interface: "{{ base_cluster_interface }}"
+keepalived_router_id: "{{ inventory_hostname }}"
+# Must be unique per VRRP domain (1-255) in this layer-2 network.
+keepalived_virtual_router_id: 56
+# Higher wins the initial election; set per host in the inventory.
+keepalived_priority: 100
+keepalived_advert_int: 1
+# Unicast instead of multicast: works on networks that filter multicast (many hypervisors).
+keepalived_unicast: true
+# nopreempt: after a failover the VIP stays on the new holder. Avoids a second, unnecessary
+# interruption when the old node returns.
+keepalived_nopreempt: true
+# Release the VIP when the local HAProxy process is gone.
+keepalived_track_process: haproxy
+keepalived_track_weight: -50
+# Abort if another host already answers ARP for the VIP (IP conflict).
+keepalived_preflight_check: true
+# Required secret (vault): keepalived_auth_pass, max. 8 characters (VRRP limitation).
+keepalived_firewall_zone: "{{ ak_firewall_zone }}"

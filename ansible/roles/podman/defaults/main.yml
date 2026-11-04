@@ -1,0 +1,18 @@
+---
+podman_packages:
+  - podman
+  - passt
+  - container-selinux
+
+# Unprivileged service account that owns and runs all containers (rootless Podman).
+# A container breakout therefore only reaches an account without sudo or login shell.
+podman_user: ak
+podman_user_home: /home/ak
+podman_user_shell: /sbin/nologin
+
+# Quadlet definitions for the service account. Placing them below /etc keeps them root-owned:
+# the service account can run the containers but cannot change their definition.
+podman_quadlet_dir: "/etc/containers/systemd/users/{{ podman_user_uid }}"
+
+# Staging directory for image archives in offline mode (removed after loading).
+podman_image_staging_dir: /var/tmp/ak-images

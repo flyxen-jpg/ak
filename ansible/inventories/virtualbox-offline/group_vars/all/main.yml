@@ -1,0 +1,14 @@
+---
+# Environment settings: VirtualBox lab without internet access.
+
+# Install RPMs, container images and collections from the offline bundle only.
+ak_offline: true
+# Extracted offline bundle on the control node (created by playbooks/bundle.yml).
+ak_bundle_dir: /srv/ak-bundle
+
+ak_cluster_network: 192.168.56.0/24
+ak_cluster_ip: "{{ ansible_host }}"
+ak_vip: 192.168.56.60
+ak_domain: lab.local
+ak_external_url: "http://{{ ak_vip }}"
+ak_firewall_zone: ak-cluster

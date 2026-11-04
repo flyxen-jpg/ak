@@ -1,0 +1,8 @@
+# Installed collections (reproducible from requirements.yml / the offline bundle)
+collections/ansible_collections/
+# Fact cache
+.cache/
+# Encrypted vaults of the lab inventories are generated per installation (tools/generate-vault.py).
+# In a real environment the ENCRYPTED vault.yml is meant to be committed; never the password file.
+inventories/*/group_vars/all/vault.yml
+*.retry

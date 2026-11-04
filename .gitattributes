@@ -1,0 +1,7 @@
+# Shell scripts, Python, YAML and templates run on Linux: always check them out with LF line
+# endings, also on Windows. CRLF breaks shebang lines ("bad interpreter") and some templates.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.zip binary
+*.tar binary
+*.iso binary

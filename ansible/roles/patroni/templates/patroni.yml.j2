@@ -1,0 +1,66 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+scope: {{ patroni_scope }}
+namespace: {{ patroni_namespace }}
+name: {{ patroni_name }}
+
+restapi:
+  listen: 0.0.0.0:{{ patroni_rest_port }}
+  connect_address: {{ patroni_listen_ip }}:{{ patroni_rest_port }}
+
+etcd3:
+  hosts: {% for h in groups[patroni_etcd_group] %}{{ hostvars[h]['ak_cluster_ip'] }}:{{ patroni_etcd_port }}{{ ',' if not loop.last }}{% endfor %}
+
+
+# Only used when the cluster is created; afterwards change these with "patronictl edit-config".
+bootstrap:
+  dcs:
+    ttl: {{ patroni_ttl }}
+    loop_wait: {{ patroni_loop_wait }}
+    retry_timeout: {{ patroni_retry_timeout }}
+    maximum_lag_on_failover: {{ patroni_maximum_lag_on_failover }}
+    synchronous_mode: {{ patroni_synchronous_mode | lower }}
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+{% for key, value in patroni_pg_parameters.items() %}
+        {{ key }}: {{ value | to_json }}
+{% endfor %}
+        ssl: "on"
+        ssl_cert_file: {{ patroni_ssl_dir }}/server.crt
+        ssl_key_file: {{ patroni_ssl_dir }}/server.key
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+  post_bootstrap: {{ patroni_config_dir }}/post_bootstrap.sh
+
+postgresql:
+  listen: 0.0.0.0:{{ patroni_pg_port }}
+  connect_address: {{ patroni_listen_ip }}:{{ patroni_pg_port }}
+  data_dir: {{ patroni_data_dir }}
+  bin_dir: {{ patroni_bin_dir }}
+  pgpass: /var/lib/pgsql/.pgpass_patroni
+  authentication:
+    superuser:
+      username: postgres
+      password: {{ patroni_superuser_password | to_json }}
+    replication:
+      username: replicator
+      password: {{ patroni_replication_password | to_json }}
+    rewind:
+      username: postgres
+      password: {{ patroni_superuser_password | to_json }}
+  # Network access only via TLS and only from the cluster network.
+  pg_hba:
+    - local all all peer
+    - hostssl replication replicator {{ ak_cluster_network }} scram-sha-256
+    - host replication replicator 127.0.0.1/32 scram-sha-256
+    - hostssl all all {{ ak_cluster_network }} scram-sha-256
+    - host all all 127.0.0.1/32 scram-sha-256
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false

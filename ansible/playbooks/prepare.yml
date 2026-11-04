@@ -1,0 +1,11 @@
+---
+- name: Prepare operating system of all cluster nodes
+  hosts: ak_cluster
+  gather_facts: true
+  roles:
+    # Offline only: local RPM repository from the bundle, online repositories disabled.
+    - role: offline_repo
+      when: ak_offline | bool
+      tags: [offline_repo]
+    - role: base
+      tags: [base]

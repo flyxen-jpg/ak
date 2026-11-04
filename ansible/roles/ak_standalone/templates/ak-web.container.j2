@@ -1,0 +1,22 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+[Unit]
+Description=Artifact Keeper web UI {{ ak_standalone_web_version }}
+Wants=ak-backend.service
+After=ak-backend.service
+
+[Container]
+ContainerName=ak-web
+Image={{ ak_standalone_web_image }}
+Pull=never
+Network=artifact-keeper.network
+# Server-side rendering talks to the backend directly.
+Environment=BACKEND_URL=http://ak-backend:8080
+Environment=HOSTNAME=0.0.0.0
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

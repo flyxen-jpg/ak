@@ -1,0 +1,54 @@
+---
+- name: Open etcd ports in the cluster zone
+  become: true
+  ansible.posix.firewalld:
+    zone: "{{ etcd_firewall_zone }}"
+    port: "{{ item }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - "{{ etcd_client_port }}"
+    - "{{ etcd_peer_port }}"
+
+- name: Provide etcd image
+  ansible.builtin.include_role:
+    name: podman
+    tasks_from: image.yml
+  vars:
+    podman_image: "{{ etcd_image }}"
+
+- name: Install etcd Quadlet unit
+  become: true
+  ansible.builtin.template:
+    src: etcd.container.j2
+    dest: "{{ podman_quadlet_dir }}/etcd.container"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart etcd
+
+- name: Apply pending etcd restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Start etcd
+  become: true
+  become_user: "{{ podman_user }}"
+  ansible.builtin.systemd_service:
+    name: etcd.service
+    scope: user
+    state: started
+    daemon_reload: true
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ podman_user_uid }}"
+
+# Members only report healthy once a quorum exists, so this waits for the whole cluster.
+- name: Wait until the etcd member is healthy
+  ansible.builtin.uri:
+    url: "http://{{ etcd_listen_ip }}:{{ etcd_client_port }}/health"
+    return_content: true
+  register: etcd_health
+  # etcd answers without a JSON content type, so the body is parsed explicitly.
+  until: etcd_health.status == 200 and (etcd_health.content | from_json).health == 'true'
+  retries: 30
+  delay: 5

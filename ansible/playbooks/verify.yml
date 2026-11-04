@@ -1,0 +1,87 @@
+---
+# End-to-end check through the VIP, the same path clients use:
+# health of every component, then upload + download of a test artifact (checksum compared).
+- name: Verify the Artifact Keeper cluster
+  hosts: ak_app[0]
+  gather_facts: false
+  vars:
+    verify_base_url: "http://{{ ak_vip }}"
+    verify_repository: ansible-smoke-test
+    # Artifacts are immutable in Artifact Keeper (re-upload = 409), so every run uses a new path.
+    verify_artifact_path: "verify/{{ verify_run_id }}.txt"
+    verify_content: "Artifact Keeper smoke test - deployed by Ansible"
+  tasks:
+    - name: Create run identifier for the test artifact
+      ansible.builtin.set_fact:
+        verify_run_id: "{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}"
+
+    - name: Wait until the VIP serves a ready backend
+      ansible.builtin.uri:
+        url: "{{ verify_base_url }}/readyz"
+      register: verify_ready
+      until: verify_ready.status == 200
+      retries: 30
+      delay: 5
+
+    - name: Read cluster status
+      ansible.builtin.command: /usr/local/bin/ak-cluster-status
+      register: verify_status
+      changed_when: false
+
+    - name: Show cluster status
+      ansible.builtin.debug:
+        msg: "{{ verify_status.stdout | regex_replace('\x1b\\[[0-9;]*m', '') | split('\n') }}"
+
+    - name: Log in as admin
+      ansible.builtin.uri:
+        url: "{{ verify_base_url }}/api/v1/auth/login"
+        method: POST
+        body_format: json
+        body:
+          username: admin
+          password: "{{ artifact_keeper_admin_password }}"
+      register: verify_login
+      no_log: true
+
+    - name: Create test repository (generic, local)
+      ansible.builtin.uri:
+        url: "{{ verify_base_url }}/api/v1/repositories"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ verify_login.json.access_token }}"
+        body_format: json
+        body:
+          key: "{{ verify_repository }}"
+          name: "{{ verify_repository }}"
+          format: generic
+          repo_type: local
+          is_public: false
+        # 409 = repository exists from an earlier run.
+        status_code: [200, 201, 409]
+      register: verify_repo
+      changed_when: verify_repo.status in [200, 201]
+
+    - name: Upload test artifact through the VIP
+      ansible.builtin.uri:
+        url: "{{ verify_base_url }}/api/v1/repositories/{{ verify_repository }}/artifacts/{{ verify_artifact_path }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ verify_login.json.access_token }}"
+          Content-Type: application/octet-stream
+        body: "{{ verify_content }}"
+        status_code: [200, 201]
+      changed_when: true
+
+    - name: Download test artifact through the VIP
+      ansible.builtin.uri:
+        url: "{{ verify_base_url }}/general/{{ verify_repository }}/{{ verify_artifact_path }}"
+        headers:
+          Authorization: "Bearer {{ verify_login.json.access_token }}"
+        return_content: true
+      register: verify_download
+
+    - name: Compare downloaded content
+      ansible.builtin.assert:
+        that: verify_download.content == verify_content
+        success_msg: "Upload/download through {{ verify_base_url }} OK (served by {{ verify_download.x_ak_backend | default('?') }})"
+        fail_msg: Downloaded content differs from the uploaded test artifact.

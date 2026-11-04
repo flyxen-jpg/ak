@@ -1,0 +1,36 @@
+# Artifact Keeper - ein HA-Knoten (Backend + Web) fuer rootless Podman.
+# Zustand liegt ausschliesslich ausserhalb: PostgreSQL (Patroni via HAProxy :5000),
+# Artefakte in S3 (Garage via HAProxy :3910), Suche in OpenSearch (via HAProxy :9201).
+# Dadurch sind beide Knoten austauschbar und koennen gleichzeitig aktiv sein.
+x-podman:
+  in_pod: false
+
+services:
+  backend:
+    image: ghcr.io/artifact-keeper/artifact-keeper-backend:${AK_VERSION}
+    container_name: ak-backend
+    env_file: ./ak.env
+    ports:
+      - "8080:8080"
+    volumes:
+      # nur lokaler Scratch (Temp/Plugins), keine Artefakte
+      - ak_scratch:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/livez"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    restart: always
+
+  web:
+    image: ghcr.io/artifact-keeper/artifact-keeper-web:${AK_WEB_VERSION}
+    container_name: ak-web
+    environment:
+      BACKEND_URL: http://${NODE_IP}:8080
+    ports:
+      - "3000:3000"
+    restart: always
+
+volumes:
+  ak_scratch:

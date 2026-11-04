@@ -1,0 +1,36 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+[Unit]
+Description=Artifact Keeper backend {{ ak_standalone_version }}
+Wants=ak-postgres.service ak-opensearch.service
+After=ak-postgres.service ak-opensearch.service
+
+[Container]
+ContainerName=ak-backend
+Image={{ ak_standalone_backend_image }}
+Pull=never
+Network=artifact-keeper.network
+{% for net in ak_standalone_extra_networks %}
+Network={{ net }}.network
+{% endfor %}
+EnvironmentFile={{ ak_standalone_config_dir }}/backend.env
+Volume=ak-storage:/data/storage
+Volume=ak-backups:/data/backups
+Volume=ak-plugins:/data/plugins
+# Exec form (JSON array): the image has curl but no shell. A plain string would run via
+# /bin/sh -c, always fail, and HealthOnFailure would keep killing a healthy backend.
+HealthCmd=["curl","-fsS","-m","4","http://localhost:8080/livez"]
+HealthInterval=15s
+HealthTimeout=5s
+HealthStartPeriod=60s
+HealthRetries=3
+HealthOnFailure=kill
+
+[Service]
+# The backend exits while PostgreSQL is not yet accepting connections; systemd retries.
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
