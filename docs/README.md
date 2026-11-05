@@ -82,7 +82,7 @@ Sie werden nicht übernommen, sondern neu angebunden. Wichtig ist die Reihenfolg
 Nein. Wird jemand in Keycloak aus einer Gruppe entfernt, wirkt das erst bei der nächsten Anmeldung. Vorhandene API Tokens funktionieren bis dahin weiter, das wurde getestet. Der Austrittsprozess muss das Konto daher auch in Artifact Keeper deaktivieren.
 
 **Was passiert mit unseren Pipelines?**
-Sie brauchen neue Tokens und die neue Adresse. Technische Konten bleiben lokal. Die in `AK_EXTERNAL_URL` eingetragene Adresse muss von allen Clients erreichbar sein, sonst scheitert `docker login`.
+Sie brauchen neue Tokens und die neue Adresse. Technische Konten bleiben lokal, ihre Tokens stellt ein Administrator aus, denn bei aktivem Identitätsanbieter können sie sich nicht mehr anmelden. Die in `AK_EXTERNAL_URL` eingetragene Adresse muss von allen Clients erreichbar sein, sonst scheitert `docker login`.
 
 **Wie groß ist der Aufwand im täglichen Betrieb?**
 Status, Updates, Backup und Fehlersuche stehen in [07](07-betrieb.md). Updates laufen als Rolling Update per Playbook.

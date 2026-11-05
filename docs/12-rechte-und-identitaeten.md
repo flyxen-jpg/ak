@@ -83,7 +83,7 @@ Eine lizenzierte Instanz liefert diese APIs laut JFrog aus. Das ändert am Ergeb
 | `POST /permissions` mit `repository_id`, `user_id`, `permissions` | API Reference, [Authentication & RBAC](https://artifactkeeper.com/docs/advanced/auth/) | veraltet. Es gilt `principal_type`, `principal_id`, `target_type`, `target_id`, `actions`. | `security_permissions.yml` läuft damit |
 | Benutzer werden bei der Anmeldung angelegt oder aktualisiert | Authentication & RBAC | stimmt nur für Benutzer ohne lokales Konto. Ein gleichnamiges lokales Konto führt zu HTTP 409. Die Seite erwähnt das nicht. | Test Keycloak |
 | `OIDC_MAP_GROUPS_TO_GROUPS` spiegelt Gruppen als lokale Gruppen | `.env.example`, Authentication & RBAC | unvollständig. Gleichnamige lokale Gruppen werden abgelehnt. Das steht nur im Quelltext. | `backend/src/api/handlers/sso.rs:1782` bis `:1804` |
-| Mit SSO ist die lokale Anmeldung standardmäßig gesperrt, der Administrator behält einen Notzugang | `.env.example` | für den Administrator bestätigt (HTTP 200). Für andere lokale Konten nicht getestet. | Test Keycloak |
+| Mit SSO ist die lokale Anmeldung standardmäßig gesperrt, der Administrator behält einen Notzugang | `.env.example` | bestätigt. Der Administrator erhält HTTP 200, andere lokale Konten HTTP 401. Nicht erwähnt wird, dass die Registry deren Passwort weiter annimmt. | Test Keycloak, `backend/src/api/handlers/auth.rs:253` |
 
 Die Seite Authentication & RBAC nennt für Rechte nur die Ebene des Repositorys. Das deckt sich mit dem Schema. Pfadmuster werden dort weder versprochen noch als fehlend genannt.
 
@@ -152,20 +152,20 @@ Dieselben Vorgänge liefen mit echten Benutzern und dem Werkzeug `skopeo` gegen 
 
 | Benutzer | Gruppen | Vorgang | JCR | Artifact Keeper |
 |---|---|---|---|---|
-| `dora` | team payments | Pull `docker-base/alpine:3.21.3` | erlaubt | erlaubt |
-| `dora` | team payments | Pull `docker-prod/web/nginx:1.27.4-alpine` | verweigert | verweigert |
-| `dora` | team payments | Push nach `docker-base` | verweigert | verweigert |
-| `hanna` | team payments, release managers | Pull `docker-prod/data/redis:7.4.2-alpine` | erlaubt | erlaubt |
-| `hanna` | team payments, release managers | Push nach `docker-prod` | erlaubt | erlaubt |
-| `ben` | platform admins, release managers | Push nach `docker-base` | erlaubt | erlaubt |
-| `rita` | security auditors | Pull `docker-prod/data/redis:7.4.2-alpine` | erlaubt | erlaubt |
-| `rita` | security auditors | Push nach `docker-prod` | verweigert | verweigert |
-| `ci-payments` | ci robots, plus eigene Regel | Push nach `docker-prod` | erlaubt | erlaubt |
-| `ci-data` | ci robots | Pull `docker-base/python:3.13.2-alpine` | erlaubt | erlaubt |
-| `ci-data` | ci robots | Push nach `docker-base` | verweigert | verweigert |
-| `nina` | team data | Pull `docker-prod/web/nginx:1.27.4-alpine` | verweigert | verweigert |
-| `ivan` | team checkout | Pull `docker-prod/web/nginx:1.27.4-alpine` | **erlaubt** | **verweigert** |
-| `ivan` | team checkout | Pull `docker-prod/data/redis:7.4.2-alpine` | verweigert | verweigert |
+| `dora` | `team-payments` | Pull `docker-base/alpine:3.21.3` | erlaubt | erlaubt |
+| `dora` | `team-payments` | Pull `docker-prod/web/nginx:1.27.4-alpine` | verweigert | verweigert |
+| `dora` | `team-payments` | Push nach `docker-base` | verweigert | verweigert |
+| `hanna` | `team-payments`, `release-managers` | Pull `docker-prod/data/redis:7.4.2-alpine` | erlaubt | erlaubt |
+| `hanna` | `team-payments`, `release-managers` | Push nach `docker-prod` | erlaubt | erlaubt |
+| `ben` | `platform-admins`, `release-managers` | Push nach `docker-base` | erlaubt | erlaubt |
+| `rita` | `security-auditors` | Pull `docker-prod/data/redis:7.4.2-alpine` | erlaubt | erlaubt |
+| `rita` | `security-auditors` | Push nach `docker-prod` | verweigert | verweigert |
+| `ci-payments` | `ci-robots`, plus eigene Regel | Push nach `docker-prod` | erlaubt | erlaubt |
+| `ci-data` | `ci-robots` | Pull `docker-base/python:3.13.2-alpine` | erlaubt | erlaubt |
+| `ci-data` | `ci-robots` | Push nach `docker-base` | verweigert | verweigert |
+| `nina` | `team-data` | Pull `docker-prod/web/nginx:1.27.4-alpine` | verweigert | verweigert |
+| `ivan` | `team-checkout` | Pull `docker-prod/web/nginx:1.27.4-alpine` | **erlaubt** | **verweigert** |
+| `ivan` | `team-checkout` | Pull `docker-prod/data/redis:7.4.2-alpine` | verweigert | verweigert |
 
 Der Unterschied bei `ivan` ist beabsichtigt und sicher: Das Target erlaubt `docker-prod` außer `data/**`. Artifact Keeper kennt dieses Muster nicht, im Modus `strict` entfällt die Regel. Abhilfe ist ein fachlicher Schnitt in Repositories, also ein eigenes Repository für `data`. Anonyme Pulls wurden auf beiden Repositories abgewiesen. Der Registryzugriff ist auch mit noch nicht geändertem Einmalpasswort möglich, obwohl das Konto `must_change_password` trägt.
 
@@ -186,7 +186,7 @@ Die Ursachen stehen im Quelltext. Benutzer werden nur über `external_id` und An
 
 | Schritt | Ergebnis |
 |---|---|
-| Lokale Benutzer und Gruppen entfernen, außer technischen Konten | Die Rechte gelöschter Principals bleiben als verwaiste Regeln zurück (11 von 13). `idp-cleanup.py` löscht sie deshalb zuerst. |
+| Lokale Benutzer und Gruppen entfernen, außer technischen Konten | Die Rechte gelöschter Principals bleiben als verwaiste Regeln zurück (11 von 13). `idp-cleanup.py` löscht sie deshalb zuerst, geprüft in [Lokale Konten und Aufräumen](#lokale-konten-und-aufräumen). |
 | Technischer Benutzer `group-seed` aus allen Gruppen meldet sich einmal an | 6 Gruppen mit `external_source = oidc` entstehen sofort |
 | `migrate.yml --tags security -e artifactory_migration_identity_mode=idp` | 7 Regeln auf die neuen Gruppen, unverändert blieb die lokale Gruppe `ci-robots` |
 | `dora`, `zoe`, `yusuf`, `rita`, `anna` melden sich an | alle erfolgreich und mit den richtigen Gruppen |
@@ -196,13 +196,13 @@ Zugriff mit dem API Token des jeweiligen Benutzers, denn Konten aus dem Identit�
 
 | Vorgang | Ergebnis |
 |---|---|
-| `zoe` (team data) Pull `docker-base/alpine:3.21.3` | erlaubt |
-| `zoe` (team data) Pull `docker-prod/web/nginx:1.27.4-alpine` | verweigert |
-| `dora` (team payments) Pull `docker-base/alpine:3.21.3` | erlaubt |
-| `dora` (team payments) Pull `docker-prod/web/nginx:1.27.4-alpine` | verweigert |
-| `yusuf` (release managers) Pull und Push auf `docker-prod` | erlaubt |
-| `rita` (security auditors) Pull `docker-prod/data/redis:7.4.2-alpine` | erlaubt |
-| `rita` (security auditors) Push nach `docker-prod` | verweigert, `You do not have access to this repository` |
+| `zoe` (`team-data`) Pull `docker-base/alpine:3.21.3` | erlaubt |
+| `zoe` (`team-data`) Pull `docker-prod/web/nginx:1.27.4-alpine` | verweigert |
+| `dora` (`team-payments`) Pull `docker-base/alpine:3.21.3` | erlaubt |
+| `dora` (`team-payments`) Pull `docker-prod/web/nginx:1.27.4-alpine` | verweigert |
+| `yusuf` (`release-managers`) Pull und Push auf `docker-prod` | erlaubt |
+| `rita` (`security-auditors`) Pull `docker-prod/data/redis:7.4.2-alpine` | erlaubt |
+| `rita` (`security-auditors`) Push nach `docker-prod` | verweigert, `You do not have access to this repository` |
 
 **Entzug von Rechten.** `zoe` wurde in Keycloak aus `team-data` entfernt.
 
@@ -213,7 +213,47 @@ Zugriff mit dem API Token des jeweiligen Benutzers, denn Konten aus dem Identit�
 
 Die Mitgliedschaft wird bei OIDC nur während der Anmeldung abgeglichen. Ein ausgeschiedener Mitarbeiter mit API Token behält seine Rechte, bis jemand eingreift. Für LDAP beschreibt `.env.example` einen regelmäßigen Abgleich (`LDAP_SYNC_INTERVAL`), getestet wurde er nicht. Der Austrittsprozess muss deshalb das Konto in Artifact Keeper deaktivieren oder seine Tokens widerrufen.
 
-Der lokale Administrator kann sich bei aktivem OIDC weiter anmelden (HTTP 200). Dieser Notzugang lässt sich mit `SSO_DISABLE_ADMIN_BREAK_GLASS` abschalten.
+### Lokale Konten und Aufräumen
+
+Sobald ein Anbieter aktiv ist, gilt für lokale Konten eine feste Regel im Code (`backend/src/api/handlers/auth.rs:253`). Der Test lief mit dem technischen Konto `ci-data` (Gruppe `ci-robots`) und mit noch nicht geändertem Einmalpasswort.
+
+| Vorgang | Ergebnis |
+|---|---|
+| Administrator meldet sich lokal an | HTTP 200. Dieser Notzugang lässt sich mit `SSO_DISABLE_ADMIN_BREAK_GLASS` abschalten. |
+| `ci-data` meldet sich lokal an | HTTP 401, `Local login is disabled when SSO is configured` |
+| `ci-data` Pull `docker-base` mit Passwort über die Registry | **erlaubt** |
+| `ci-data` Pull `docker-prod` mit Passwort über die Registry | verweigert, das Konto hat dort kein Recht |
+| Administrator stellt für `ci-data` ein Token aus | erfolgreich |
+| `ci-data` Pull `docker-base` mit diesem Token | erlaubt |
+
+Daraus folgt: Lokale Konten können bei aktivem Anbieter weder die Oberfläche nutzen noch ihr Einmalpasswort selbst ändern. Die Registry nimmt das Passwort aber weiter an. Technische Konten sollten deshalb nur Tokens nutzen, die ein Administrator ausstellt, und das Einmalpasswort sollte nicht im Umlauf bleiben.
+
+Ein Token wird je nach Schnittstelle unterschiedlich übergeben. Die Registry erwartet es als Passwort, also als `benutzer:token`. Die REST API erwartet `Authorization: Bearer <token>` und antwortet auf Basic Auth mit 401.
+
+`idp-cleanup.py` wurde mit einem eigens angelegten Benutzer und einer Gruppe mit je einer Regel geprüft:
+
+| Schritt | Regeln gesamt | Regeln der Testobjekte | ohne vorhandenen Principal |
+|---|---|---|---|
+| vorher | 23 | 2 | 11 |
+| ohne `--apply` | 23 | 2 | 11 |
+| mit `--apply` | 21 | 0 | 11 |
+
+Die 11 Regeln ohne Principal stammen aus dem ersten Durchlauf, bevor das Skript Regeln mitlöschte. Sie blieben im Labor stehen und wären sonst über `DELETE /api/v1/permissions/<id>` zu entfernen.
+
+### Mehrere Targets für dieselbe Gruppe
+
+Rechte addieren sich in Artifactory über alle Targets. Artifact Keeper erlaubt je Gruppe und Repository nur eine Regel. Zwei Targets gaben `team-payments` auf `generic-tools` das Recht READ und READ mit WRITE. Das Playbook legte daraus eine Regel an.
+
+| Prüfung | Ergebnis |
+|---|---|
+| Regeln auf `generic-tools` | 1, mit `read` und `write` |
+| `dora` (`team-payments`) lädt eine Datei hoch | HTTP 201 |
+| `dora` lädt die Datei herunter | HTTP 200 |
+| `rita` (`security-auditors`) liest die Datei | HTTP 404 |
+| `rita` lädt hoch | HTTP 403 |
+| zweiter Lauf des Playbooks | keine Änderung |
+
+Eine schon vorhandene Regel wird nicht erweitert. Kommt in der Quelle später ein Recht hinzu, muss die alte Regel erst gelöscht werden. Das Playbook prüft bei bestehenden Regeln nur, ob es sie gibt.
 
 ## Empfohlener Ablauf mit Identitätsanbieter
 
@@ -226,7 +266,7 @@ Dieser Ablauf gilt, wenn die Benutzer schon in einem Verzeichnis liegen, was bei
 5. Technischen Benutzer in allen betroffenen Gruppen einmal anmelden, außer in der Administratorgruppe. Sonst erhält er Administratorrechte, wie im Test zu sehen war.
 6. Rechte übertragen: `migrate.yml --tags security -e artifactory_migration_identity_mode=idp`. Die gemeldeten Regeln mit Pfadmustern fachlich lösen.
 7. Den technischen Benutzer entfernen.
-8. Technische Konten für Pipelines bleiben lokal und bekommen neue Tokens.
+8. Technische Konten für Pipelines bleiben lokal. Ihre Tokens stellt ein Administrator aus, weil diese Konten sich nicht mehr anmelden können.
 9. Den Austrittsprozess um das Deaktivieren in Artifact Keeper ergänzen.
 
 Liegt schon eine Migration mit lokalen Konten vor, müssen diese vorab entfernt werden: `tools/evidence/idp-cleanup.py` zeigt ohne `--apply` nur an, was betroffen wäre. Die Kennung `sub` des Anbieters muss stabil bleiben. Ändert sie sich, etwa weil ein Realm neu angelegt wird, findet Artifact Keeper den Benutzer nicht mehr und das Anlegen scheitert am Namen. Das ergibt sich aus dem Quelltext und wurde nicht eigens getestet.
@@ -267,6 +307,7 @@ AK_URL=http://10.0.10.250 AK_ADMIN_PASSWORD=<aus dem Vault> tools/evidence/idp-c
 AK_URL=http://10.0.10.250 AK_PUBLIC_URL=http://localhost:30090 IDP_PASSWORD=<aus dem Vault> tools/evidence/oidc-login.py group-seed
 ansible-playbook -i inventories/natnetwork/hosts.yml playbooks/migrate.yml --tags security -e artifactory_migration_identity_mode=idp
 tools/evidence/oidc-scenario.sh inventories/natnetwork/group_vars/all/vault.yml
+tools/evidence/rights-check.sh inventories/natnetwork/group_vars/all/vault.yml 10.0.10.6
 ```
 
 ## Nicht geprüft
@@ -276,6 +317,4 @@ tools/evidence/oidc-scenario.sh inventories/natnetwork/group_vars/all/vault.yml
 | Lizenziertes Artifactory Pro oder Enterprise als Quelle | nicht verfügbar. Gruppen und Rechte wurden auf JCR und OSS geprüft. |
 | LDAP und SAML | nur aus Quelltext und Dokumentation bekannt, nicht getestet |
 | Anmeldung im Browser über die Weboberfläche | nicht getestet, nur der gleichwertige Ablauf per Skript |
-| Lokale Konten außer dem Administrator bei aktivem SSO | nicht getestet, laut `.env.example` gesperrt. Vor der Einführung ist das für technische Konten zu klären. |
 | Rechte beim Zugriff über virtuelle Repositories | nicht getestet |
-| Vereinen mehrerer Targets zu einer Regel | zuletzt ergänzt, nicht im Labor gelaufen |

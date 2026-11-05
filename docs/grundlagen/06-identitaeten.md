@@ -65,4 +65,4 @@ Ein Docker Client kann keine Browseranmeldung durchführen, und Konten aus dem I
 * Fehlt der Scope, lautet die Meldung `Token does not have required scope`. Der Scope begrenzt das Token zusätzlich zu den Rechten des Benutzers.
 * Wird jemand beim IdP aus einer Gruppe entfernt, ändert das zunächst nichts. Der Abgleich läuft erst bei der nächsten Anmeldung. Bis dahin funktioniert das Token weiter. Beim Austritt eines Mitarbeiters ist das Konto daher auch in Artifact Keeper zu deaktivieren.
 
-Pipelines nutzen in der Regel lokale technische Konten mit eigenen Tokens.
+Pipelines nutzen in der Regel lokale technische Konten mit eigenen Tokens. Ist ein Identitätsanbieter aktiv, können sich lokale Konten nicht mehr anmelden. Ihr Token stellt daher ein Administrator aus.
