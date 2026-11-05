@@ -25,7 +25,7 @@
       {%- set key = f.repo | regex_replace('-cache$', '') -%}
       {%- if key in artifactory_migration_repos -%}
       {%- set _ = out.append({'repo': key, 'path': (f.name if f.path == '.' else f.path ~ '/' ~ f.name), 'name': f.name,
-           'sha256': f.sha256, 'endpoint': 'general' if key == 'generic-files' else 'maven'}) -%}
+           'sha256': f.sha256, 'endpoint': artifactory_migration_verify_endpoints[key] | default('maven')}) -%}
       {%- endif -%}
       {%- endfor -%}
       {{ out }}
@@ -81,8 +81,8 @@
         identical: {{ artifactory_migration_compare | length - artifactory_migration_bad | length }}
       - "Missing or different: {{ artifactory_migration_bad | map(attribute='item') | map(attribute='path') | list }}"
       - >-
-        Known gaps, not compared: {{ artifactory_migration_known_gaps | map(attribute='repo')
-        | zip(artifactory_migration_known_gaps | map(attribute='path')) | map('join', '/') | list }}
+        Not compared here (known gap or checked by another step): {{ artifactory_migration_known_gaps | length }} files
+        in {{ artifactory_migration_known_gaps | map(attribute='repo') | unique | list }}
 
 - name: Fail on missing or different files
   ansible.builtin.assert:

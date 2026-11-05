@@ -1,0 +1,16 @@
+---
+# Test data for a migration from JFrog Container Registry (lab only): production images with
+# pinned tags, Helm charts, generic files, whole user groups and permission targets.
+#   ansible-playbook -i inventories/<env>/hosts.yml playbooks/jcr_seed.yml
+- name: Fill JFrog Container Registry with test data
+  hosts: migration_runner
+  gather_facts: false
+  # The UI API of Artifactory answers the first login only after 30 to 60 seconds.
+  module_defaults:
+    ansible.builtin.uri:
+      timeout: 90
+  tasks:
+    - name: Create test data
+      ansible.builtin.import_role:
+        name: artifactory_migration
+        tasks_from: seed_jcr.yml

@@ -1,0 +1,37 @@
+---
+# JFrog Container Registry refuses UI logins and most administration until its license
+# agreement is accepted. There is no documented REST API for this; the calls below are the
+# ones the web UI makes. Accepting stays an explicit decision (artifactory_oss_accept_eula).
+
+- name: Check whether the license agreement is still open
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ artifactory_oss_http_port }}/artifactory/ui/jcr/eula/required"
+    url_username: "{{ artifactory_oss_admin_user }}"
+    url_password: "{{ artifactory_oss_admin_password }}"
+    force_basic_auth: true
+    headers:
+      X-Requested-With: XMLHttpRequest
+    timeout: 60
+  register: artifactory_oss_eula
+
+- name: Stop when the agreement is open and accepting was not allowed
+  ansible.builtin.assert:
+    that: not artifactory_oss_eula.json.required or artifactory_oss_accept_eula | bool
+    fail_msg: >-
+      The JFrog license agreement is open. Accept it in the web UI or set
+      artifactory_oss_accept_eula to true after reading it.
+    quiet: true
+
+- name: Accept the license agreement
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ artifactory_oss_http_port }}/artifactory/ui/jcr/eula/accept"
+    method: POST
+    url_username: "{{ artifactory_oss_admin_user }}"
+    url_password: "{{ artifactory_oss_admin_password }}"
+    force_basic_auth: true
+    headers:
+      X-Requested-With: XMLHttpRequest
+    status_code: [200, 201, 204]
+    timeout: 60
+  when: artifactory_oss_eula.json.required
+  changed_when: true

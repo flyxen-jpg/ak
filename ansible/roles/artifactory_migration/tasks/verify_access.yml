@@ -1,0 +1,117 @@
+---
+# Functional check of the migrated rights: the same operations run as real users against the
+# source and against Artifact Keeper. Differences are expected only where the table in
+# defaults/main.yml says so, and each one is reported.
+
+- name: Read the one-time passwords of the migrated users
+  become: true
+  ansible.builtin.slurp:
+    src: "{{ artifactory_migration_password_file }}"
+  register: artifactory_migration_otp_file
+  no_log: true
+
+- name: Remember the one-time passwords
+  ansible.builtin.set_fact:
+    artifactory_migration_otp: >-
+      {{ (artifactory_migration_otp_file.content | b64decode).splitlines() | map('split', ' ')
+         | items2dict(key_name=0, value_name=1) }}
+  no_log: true
+
+- name: Create work directory
+  ansible.builtin.file:
+    path: "{{ artifactory_migration_verify_dir }}-access"
+    state: directory
+    mode: "0700"
+
+- name: Run the access tests
+  block:
+    - name: Import token proxy tasks
+      ansible.builtin.import_tasks: token_proxy.yml
+
+    - name: Write the auth file of the administrator
+      ansible.builtin.copy:
+        dest: "{{ artifactory_migration_verify_dir }}-access/admin.json"
+        content: >-
+          {{ {'auths': {artifactory_migration_registry_host:
+             {'auth': (artifactory_migration_rt_user ~ ':' ~ artifactory_migration_rt_password) | b64encode}}} | to_json }}
+        mode: "0600"
+      no_log: true
+
+    - name: Prepare a small image for the push tests
+      ansible.builtin.command:
+        argv:
+          - skopeo
+          - copy
+          - --src-tls-verify=false
+          - --src-authfile={{ artifactory_migration_verify_dir }}-access/admin.json
+          - docker://{{ artifactory_migration_registry_host }}/docker-base/busybox:1.37.0
+          - oci-archive:{{ artifactory_migration_verify_dir }}-access/push.tar
+      changed_when: false
+
+    - name: Try every operation against the source
+      ansible.builtin.script:
+        cmd: >-
+          check-access.sh {{ artifactory_migration_registry_host }} {{ item.user }} {{ item.action }} {{ item.ref }}
+          {{ artifactory_migration_verify_dir }}-access/push.tar {{ artifactory_migration_verify_dir }}-access
+      environment:
+        CHECK_PASSWORD: "Lab-Passw0rd-{{ item.user }}!"
+      loop: "{{ artifactory_migration_access_tests }}"
+      loop_control:
+        label: "{{ item.user }} {{ item.action }} {{ item.ref }}"
+      register: artifactory_migration_access_source
+      changed_when: false
+
+    - name: Try every operation against Artifact Keeper
+      ansible.builtin.script:
+        cmd: >-
+          check-access.sh {{ artifactory_migration_ak_registry }} {{ item.user }} {{ item.action }} {{ item.ref }}
+          {{ artifactory_migration_verify_dir }}-access/push.tar {{ artifactory_migration_verify_dir }}-access
+      environment:
+        CHECK_PASSWORD: "{{ artifactory_migration_otp[item.user] }}"
+      loop: "{{ artifactory_migration_access_tests }}"
+      loop_control:
+        label: "{{ item.user }} {{ item.action }} {{ item.ref }}"
+      register: artifactory_migration_access_target
+      changed_when: false
+  always:
+    - name: Remove the work directory
+      ansible.builtin.file:
+        path: "{{ artifactory_migration_verify_dir }}-access"
+        state: absent
+
+    - name: Stop the token proxy
+      become: true
+      ansible.builtin.systemd_service:
+        name: ak-token-proxy.service
+        state: stopped
+      failed_when: false
+
+- name: Compare the results
+  ansible.builtin.set_fact:
+    artifactory_migration_access_table: >-
+      {%- set out = [] -%}
+      {%- for t in artifactory_migration_access_tests -%}
+      {%- set s = artifactory_migration_access_source.results[loop.index0].stdout | trim -%}
+      {%- set a = artifactory_migration_access_target.results[loop.index0].stdout | trim -%}
+      {%- set _ = out.append({'test': t.user ~ ' ' ~ t.action ~ ' ' ~ t.ref,
+            'source': s.split(' ')[0], 'target': a.split(' ')[0], 'expected': t.expect, 'why': t.why | default(''),
+            'target_detail': a}) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Show the access matrix
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.test }}: source {{ item.source }}, target {{ item.target }}{{ ' (' ~ item.why ~ ')' if item.why else '' }}
+  loop: "{{ artifactory_migration_access_table }}"
+  loop_control:
+    label: "{{ item.test }}"
+
+- name: Fail on unexpected results in Artifact Keeper
+  ansible.builtin.assert:
+    that: item.target == item.expected
+    fail_msg: "{{ item.test }}: expected {{ item.expected }}, got {{ item.target_detail }}"
+    quiet: true
+  loop: "{{ artifactory_migration_access_table }}"
+  loop_control:
+    label: "{{ item.test }}"

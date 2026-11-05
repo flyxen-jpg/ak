@@ -1,0 +1,69 @@
+---
+# Independent check of the container migration: for every pinned tag the manifest digest of
+# source and target must match, and the target must deliver all layers with a valid digest.
+
+- name: Create work directory
+  ansible.builtin.file:
+    path: "{{ artifactory_migration_verify_dir }}-images"
+    state: directory
+    mode: "0700"
+
+- name: Compare images
+  block:
+    - name: Import token proxy tasks
+      ansible.builtin.import_tasks: token_proxy.yml
+
+    - name: Write the registry auth file
+      ansible.builtin.copy:
+        dest: "{{ artifactory_migration_verify_dir }}-images/auth.json"
+        content: >-
+          {{ {'auths': {
+               artifactory_migration_registry_host: {'auth': (artifactory_migration_rt_user ~ ':' ~ artifactory_migration_rt_password) | b64encode},
+               artifactory_migration_ak_registry: {'auth': (artifactory_migration_ak_user ~ ':' ~ artifactory_migration_ak_password) | b64encode}
+             }} | to_json }}
+        mode: "0600"
+      no_log: true
+
+    - name: Compare every image with the source
+      vars:
+        artifactory_migration_tag: "{{ item.source | regex_replace('^.*:', '') }}"
+      ansible.builtin.script:
+        cmd: >-
+          compare-image.sh
+          {{ artifactory_migration_registry_host }}/{{ item.repo }}/{{ item.name }}:{{ artifactory_migration_tag }}
+          {{ artifactory_migration_ak_registry }}/{{ item.repo }}/{{ item.name }}:{{ artifactory_migration_tag }}
+          {{ artifactory_migration_verify_dir }}-images/auth.json
+          {{ artifactory_migration_verify_dir }}-images
+      loop: "{{ artifactory_migration_images }}"
+      loop_control:
+        label: "{{ item.repo }}/{{ item.name }}:{{ artifactory_migration_tag }}"
+      register: artifactory_migration_image_results
+      changed_when: false
+  always:
+    - name: Remove work directory and auth file
+      ansible.builtin.file:
+        path: "{{ artifactory_migration_verify_dir }}-images"
+        state: absent
+
+    - name: Stop the token proxy
+      become: true
+      ansible.builtin.systemd_service:
+        name: ak-token-proxy.service
+        state: stopped
+      failed_when: false
+
+- name: Show the comparison result
+  vars:
+    artifactory_migration_lines: "{{ artifactory_migration_image_results.results | map(attribute='stdout') | map('trim') | list }}"
+  ansible.builtin.debug:
+    msg:
+      - "Images: {{ artifactory_migration_lines | length }}, identical: {{ artifactory_migration_lines | select('match', '^IDENTICAL') | list | length }}"
+      - "{{ artifactory_migration_lines }}"
+
+- name: Fail on missing or different images
+  ansible.builtin.assert:
+    that: >-
+      artifactory_migration_image_results.results | map(attribute='stdout') | map('trim')
+      | reject('match', '^IDENTICAL') | list | length == 0
+    fail_msg: Some images differ from the source or cannot be pulled completely (see above).
+    quiet: true

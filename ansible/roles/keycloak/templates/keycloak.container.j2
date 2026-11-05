@@ -1,0 +1,22 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+[Unit]
+Description=Keycloak test identity provider
+
+[Container]
+ContainerName=keycloak
+Image={{ keycloak_image }}
+Pull=never
+EnvironmentFile={{ keycloak_config_dir }}/keycloak.env
+# Keycloak runs as uid 1000 in the image; map it to the service account that owns the realm file.
+UserNS=keep-id:uid=1000,gid=1000
+Volume={{ keycloak_config_dir }}/{{ keycloak_realm }}-realm.json:/opt/keycloak/data/import/{{ keycloak_realm }}-realm.json:ro,Z
+PublishPort={{ keycloak_http_port }}:8080
+Exec=start-dev --import-realm
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

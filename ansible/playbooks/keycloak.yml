@@ -1,0 +1,9 @@
+---
+# Keycloak as test identity provider on the hosts of group "identity_provider".
+#   ansible-playbook -i inventories/<env>/hosts.yml playbooks/keycloak.yml
+- name: Install Keycloak
+  hosts: identity_provider
+  gather_facts: true
+  roles:
+    - role: keycloak
+      tags: [keycloak]

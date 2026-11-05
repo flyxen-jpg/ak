@@ -16,13 +16,53 @@ ak_external_url: "http://localhost:30090"
 ak_firewall_zone: ak-cluster
 
 # The Artifact Keeper backends may connect to the migration source (Artifactory on ak-ha3).
-artifact_keeper_ssrf_allow_private_cidrs: "{{ hostvars['ak-ha3']['ansible_host'] }}/32"
+# The identity provider on the management VM is allowed in the same way.
+artifact_keeper_ssrf_allow_private_cidrs: "{{ hostvars['ak-ha3']['ansible_host'] }}/32,{{ hostvars['ak-mgmt']['ansible_host'] }}/32"
 
-# Artifactory on the quorum node: smaller heap, port open in the cluster zone.
+# Single sign-on with Keycloak: install it with playbooks/keycloak.yml, then roll out
+# playbooks/artifact_keeper.yml with -e ak_oidc_enabled=true. Removing the variables again
+# disables the provider at the next start of the backends.
+ak_oidc_enabled: false
+artifact_keeper_extra_env: "{{ ak_oidc_env if ak_oidc_enabled | bool else {} }}"
+# OIDC_MAP_GROUPS_TO_GROUPS mirrors the group claim of the token into groups of Artifact Keeper.
+ak_oidc_env:
+  OIDC_NAME: keycloak
+  OIDC_ISSUER: "http://{{ hostvars['ak-mgmt']['ansible_host'] }}:8080/realms/lab"
+  OIDC_CLIENT_ID: artifact-keeper
+  OIDC_CLIENT_SECRET: "{{ keycloak_client_secret }}"
+  OIDC_REDIRECT_URI: "{{ ak_external_url }}/api/v1/auth/sso/oidc/callback"
+  OIDC_GROUPS_CLAIM: groups
+  OIDC_SCOPES: openid profile email
+  OIDC_MAP_GROUPS_TO_GROUPS: "true"
+  OIDC_AUTO_CREATE_USERS: "true"
+  OIDC_ADMIN_GROUP: platform-admins
+
+# Migration source on the quorum node: JFrog Container Registry, smaller heap, port open in
+# the cluster zone. The EULA of JFrog is accepted for this lab instance only.
+artifactory_oss_edition: artifactory-jcr
+artifactory_oss_accept_eula: true
 artifactory_oss_java_opts: "-Xms512m -Xmx1024m"
 artifactory_oss_firewall_zones:
   - "{{ ak_firewall_zone }}"
   - public
+
+# Repositories of the container source that are migrated. Container images are verified by
+# digest (tag "verify_images"), the remaining files by SHA-256 through their native endpoint.
+artifactory_migration_repos:
+  - docker-base
+  - docker-prod
+  - docker-hub
+  - helm-local
+  - generic-tools
+artifactory_migration_verify_skip_repos:
+  - docker-base
+  - docker-prod
+  - docker-hub
+artifactory_migration_verify_endpoints:
+  helm-local: helm
+  generic-tools: general
+# ak_external_url points to a port on the VirtualBox host, see tasks/token_proxy.yml.
+artifactory_migration_token_proxy: "30090"
 
 # Migration playbooks run on ak-ha3 (see group migration_runner).
 artifactory_migration_ak_url: "http://{{ ak_vip }}"

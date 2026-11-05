@@ -1,0 +1,51 @@
+{%- set users = keycloak_groups | map(attribute='members') | flatten | unique -%}
+{
+  "realm": {{ keycloak_realm | to_json }},
+  "enabled": true,
+  "sslRequired": "none",
+  "groups": [
+{% for group in keycloak_groups %}
+    { "name": {{ group.name | to_json }} }{{ "," if not loop.last }}
+{% endfor %}
+  ],
+  "users": [
+{% for user in users %}
+    {
+      "username": {{ user | to_json }},
+      "email": {{ (user ~ '@lab.local') | to_json }},
+      "emailVerified": true,
+      "firstName": {{ user | capitalize | to_json }},
+      "lastName": "Lab",
+      "enabled": true,
+      "credentials": [{ "type": "password", "value": {{ keycloak_test_password | to_json }}, "temporary": false }],
+      "groups": {{ keycloak_groups | selectattr('members', 'contains', user) | map(attribute='name') | map('regex_replace', '^', '/') | list | to_json }}
+    }{{ "," if not loop.last }}
+{% endfor %}
+  ],
+  "clients": [
+    {
+      "clientId": {{ keycloak_client_id | to_json }},
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": {{ keycloak_client_secret | to_json }},
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": {{ keycloak_redirect_uris | to_json }},
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ]
+}

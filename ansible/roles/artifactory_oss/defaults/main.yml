@@ -8,6 +8,10 @@ artifactory_oss_registry: releases-docker.jfrog.io
 artifactory_oss_image: "{{ artifactory_oss_registry }}/jfrog/{{ artifactory_oss_edition }}:{{ artifactory_oss_version }}"
 artifactory_oss_postgres_image: "{{ artifactory_oss_registry }}/postgres:17.10-alpine"
 
+# JFrog Container Registry shows a license agreement before it can be used. Accepting it is a
+# decision of the operator, so the role does it only when this is set to true.
+artifactory_oss_accept_eula: false
+
 # Router port: web UI, REST API and repositories (http://<host>:8082/artifactory/...).
 artifactory_oss_http_port: 8082
 

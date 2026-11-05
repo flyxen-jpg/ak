@@ -82,14 +82,25 @@
   ansible.builtin.set_fact:
     artifactory_migration_ak_groups: "{{ artifactory_migration_target_groups.json['items'] | items2dict(key_name='name', value_name='id') }}"
 
+# 200 is the maximum page size of this API. Larger groups would be read incompletely, which the
+# assertion below turns into a clear error instead of wrong memberships.
 - name: Read current group members in Artifact Keeper
   ansible.builtin.uri:
-    url: "{{ artifactory_migration_ak_url }}/api/v1/groups/{{ item.value }}"
+    url: "{{ artifactory_migration_ak_url }}/api/v1/groups/{{ item.value }}?member_limit=200"
     headers: "{{ artifactory_migration_ak_auth }}"
   loop: "{{ artifactory_migration_ak_groups | dict2items }}"
   loop_control:
     label: "{{ item.key }}"
   register: artifactory_migration_target_members
+
+- name: Check that all members could be read
+  ansible.builtin.assert:
+    that: item.json.members_total | default(0) | int <= 200
+    fail_msg: "Group {{ item.item.key }} has more than 200 members; extend this task with paging."
+    quiet: true
+  loop: "{{ artifactory_migration_target_members.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
 
 # Artifactory returns the groups of a user as objects ({"name": ...}) or plain names,
 # depending on the version; both are handled.
@@ -104,6 +115,33 @@
       {%- endfor -%}
       {%- endfor -%}
       {{ m }}
+
+# Artifactory stays the source of truth until the cut-over: somebody removed from a group there
+# must not keep the rights of that group here. The built-in admin account and groups that only
+# exist in Artifact Keeper are not touched.
+- name: Remove members that are no longer in the source group
+  vars:
+    artifactory_migration_wanted_ids: >-
+      {{ artifactory_migration_src_membership[item.item.key] | default([]) | select('in', artifactory_migration_ak_users)
+         | map('extract', artifactory_migration_ak_users) | list }}
+    artifactory_migration_current_ids: >-
+      {{ item.json.members | default([]) | map(attribute='user_id') | list }}
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_ak_url }}/api/v1/groups/{{ item.item.value }}/members"
+    method: DELETE
+    headers: "{{ artifactory_migration_ak_auth }}"
+    body_format: json
+    body:
+      user_ids: "{{ artifactory_migration_current_ids | difference(artifactory_migration_wanted_ids) }}"
+    status_code: [200, 204]
+  loop: "{{ artifactory_migration_target_members.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  when:
+    - artifactory_migration_remove_stale_members | bool
+    - item.item.key in artifactory_migration_src_lists.results[0].json.groups | map(attribute='name')
+    - artifactory_migration_current_ids | difference(artifactory_migration_wanted_ids) | length > 0
+  changed_when: true
 
 - name: Add members to groups
   vars:

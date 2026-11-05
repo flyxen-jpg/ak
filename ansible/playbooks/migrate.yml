@@ -34,6 +34,17 @@
         name: artifactory_migration
         tasks_from: verify.yml
 
+- name: Verify migrated container images
+  hosts: migration_runner
+  gather_facts: false
+  # Needs artifactory_migration_images, so it runs only when asked for (container source).
+  tags: [never, verify_images]
+  tasks:
+    - name: Compare every image by digest
+      ansible.builtin.import_role:
+        name: artifactory_migration
+        tasks_from: verify_images.yml
+
 - name: Migrate users, groups and permissions
   hosts: migration_runner
   gather_facts: false
@@ -47,3 +58,14 @@
       ansible.builtin.import_role:
         name: artifactory_migration
         tasks_from: security.yml
+
+- name: Verify migrated rights with real users
+  hosts: migration_runner
+  gather_facts: false
+  # Container test data only (playbooks/jcr_seed.yml), so it runs only when asked for.
+  tags: [never, verify_access]
+  tasks:
+    - name: Run the access matrix
+      ansible.builtin.import_role:
+        name: artifactory_migration
+        tasks_from: verify_access.yml

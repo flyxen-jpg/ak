@@ -44,19 +44,163 @@ artifactory_migration_verify_skip_repos:
   - gradle-plugins
 artifactory_migration_verify_skip_names:
   - maven-metadata.xml
+# Download path per repository in Artifact Keeper; all others use the Maven endpoint.
+artifactory_migration_verify_endpoints:
+  generic-files: general
+
+# Registry address of Artifact Keeper as seen from the runner. It must match the external URL
+# of the cluster, because the token address in the registry challenge is derived from it.
+artifactory_migration_ak_registry: "{{ ak_external_url | default('http://127.0.0.1:30080') | regex_replace('^https?://', '') }}"
+# Lab only: port on the runner that forwards to the target below (see tasks/token_proxy.yml).
+artifactory_migration_token_proxy: ""
+artifactory_migration_token_proxy_target: "{{ ak_vip | default('127.0.0.1') }}:80"
+
+# Operations tried as real users against source and target (tasks/verify_access.yml).
+# "expect" is the result in Artifact Keeper, "why" explains an intended difference to the source.
+artifactory_migration_access_tests:
+  - { user: dora, action: pull, ref: "docker-base/alpine:3.21.3", expect: ALLOW }
+  - { user: dora, action: pull, ref: "docker-prod/web/nginx:1.27.4-alpine", expect: DENY }
+  - { user: dora, action: push, ref: "docker-base/access-test/dora:1", expect: DENY }
+  - { user: hanna, action: pull, ref: "docker-prod/data/redis:7.4.2-alpine", expect: ALLOW }
+  - { user: hanna, action: push, ref: "docker-prod/access-test/hanna:1", expect: ALLOW }
+  - { user: ben, action: push, ref: "docker-base/access-test/ben:1", expect: ALLOW }
+  - { user: rita, action: pull, ref: "docker-prod/data/redis:7.4.2-alpine", expect: ALLOW }
+  - { user: rita, action: push, ref: "docker-prod/access-test/rita:1", expect: DENY }
+  - { user: ci-payments, action: push, ref: "docker-prod/access-test/ci-payments:1", expect: ALLOW }
+  - { user: ci-data, action: pull, ref: "docker-base/python:3.13.2-alpine", expect: ALLOW }
+  - { user: ci-data, action: push, ref: "docker-base/access-test/ci-data:1", expect: DENY }
+  - { user: nina, action: pull, ref: "docker-prod/web/nginx:1.27.4-alpine", expect: DENY }
+  # Exclude pattern: in the source ivan reads web/** but not data/**. Artifact Keeper has no
+  # path patterns, so the rule is skipped in strict mode and ivan loses both.
+  - { user: ivan, action: pull, ref: "docker-prod/web/nginx:1.27.4-alpine", expect: DENY, why: "rule with path pattern skipped in strict mode" }
+  - { user: ivan, action: pull, ref: "docker-prod/data/redis:7.4.2-alpine", expect: DENY }
 
 # Security migration. strict: rules with include/exclude path patterns are skipped
 # (Artifact Keeper has no path patterns). broad: they are granted for the whole repository.
 artifactory_migration_security_mode: strict
+# local: users and groups are created in Artifact Keeper (no identity provider).
+# idp: only rules are created. Users and groups must exist through a login at the identity
+# provider first, because a local user or group with the same name blocks the federated one.
+artifactory_migration_identity_mode: local
+# Removes group members that are no longer in the source group, so repeated runs before the
+# cut-over follow the source. Set to false once groups are maintained in Artifact Keeper.
+artifactory_migration_remove_stale_members: true
 # Generated one-time passwords of migrated users (readable by root only).
 artifactory_migration_password_file: /root/ak-migrated-users.txt
 
+# Container source (lab only, playbooks/jcr_seed.yml). Tags are pinned as in production, so a
+# run is reproducible and the digests can be compared. multi_arch copies all platforms and
+# therefore also exercises manifest lists, the other images are copied for linux/amd64 only.
+artifactory_migration_registry_host: "127.0.0.1:8082"
+artifactory_migration_image_timeout: 1800
+artifactory_migration_images:
+  - { source: docker.io/library/alpine:3.21.3, repo: docker-base, name: alpine, multi_arch: true }
+  - { source: docker.io/library/alpine:3.20.6, repo: docker-base, name: alpine }
+  - { source: docker.io/library/busybox:1.37.0, repo: docker-base, name: busybox, multi_arch: true }
+  - { source: docker.io/library/debian:12.10-slim, repo: docker-base, name: debian }
+  - { source: docker.io/library/python:3.13.2-alpine, repo: docker-base, name: python }
+  - { source: docker.io/library/python:3.12.9-alpine, repo: docker-base, name: python }
+  - { source: docker.io/library/node:22.14.0-alpine, repo: docker-base, name: node }
+  - { source: docker.io/library/eclipse-temurin:21.0.6_7-jre-alpine, repo: docker-base, name: eclipse-temurin }
+  - { source: docker.io/library/nginx:1.27.4-alpine, repo: docker-prod, name: web/nginx }
+  - { source: docker.io/library/nginx:1.26.3-alpine, repo: docker-prod, name: web/nginx }
+  - { source: docker.io/library/httpd:2.4.63-alpine, repo: docker-prod, name: web/httpd }
+  - { source: docker.io/library/haproxy:3.0.9-alpine, repo: docker-prod, name: web/haproxy }
+  - { source: docker.io/library/traefik:v3.3.4, repo: docker-prod, name: web/traefik }
+  - { source: docker.io/library/caddy:2.9.1-alpine, repo: docker-prod, name: web/caddy }
+  - { source: docker.io/library/postgres:17.4-alpine, repo: docker-prod, name: data/postgres }
+  - { source: docker.io/library/postgres:16.8-alpine, repo: docker-prod, name: data/postgres }
+  - { source: docker.io/library/redis:7.4.2-alpine, repo: docker-prod, name: data/redis }
+  - { source: docker.io/library/memcached:1.6.37-alpine, repo: docker-prod, name: data/memcached }
+  - { source: docker.io/library/rabbitmq:3.13.7-alpine, repo: docker-prod, name: data/rabbitmq }
+  - { source: docker.io/library/registry:2.8.3, repo: docker-prod, name: infra/registry }
+  - { source: quay.io/coreos/etcd:v3.5.19, repo: docker-prod, name: infra/etcd }
+  - { source: docker.io/prom/prometheus:v3.2.1, repo: docker-prod, name: observability/prometheus }
+  - { source: docker.io/prom/alertmanager:v0.28.1, repo: docker-prod, name: observability/alertmanager }
+  - { source: docker.io/grafana/grafana:11.5.2, repo: docker-prod, name: observability/grafana }
+
+# Pulled through the remote repository, so its cache has content to migrate.
+artifactory_migration_remote_images:
+  - library/hello-world:linux
+  - library/alpine:3.19.7
+
+# Well known files for the Helm and generic repositories.
+artifactory_migration_downloads:
+  - url: https://github.com/kubernetes/ingress-nginx/releases/download/helm-chart-4.12.0/ingress-nginx-4.12.0.tgz
+    repo: helm-local
+    path: ingress-nginx-4.12.0.tgz
+  - url: https://github.com/prometheus-community/helm-charts/releases/download/prometheus-27.5.0/prometheus-27.5.0.tgz
+    repo: helm-local
+    path: prometheus-27.5.0.tgz
+  - url: https://github.com/grafana/helm-charts/releases/download/grafana-8.10.0/grafana-8.10.0.tgz
+    repo: helm-local
+    path: grafana-8.10.0.tgz
+  - { url: "https://get.helm.sh/helm-v3.17.1-linux-amd64.tar.gz", repo: generic-tools, path: helm/3.17.1/helm-v3.17.1-linux-amd64.tar.gz }
+  - { url: "https://dl.k8s.io/release/v1.32.2/bin/linux/amd64/kubectl", repo: generic-tools, path: kubectl/1.32.2/kubectl }
+
+# Groups as in a production organization, with overlapping memberships. Users are derived
+# from this list and every user gets the address <name>@lab.local.
+artifactory_migration_jcr_groups:
+  - { name: platform-admins, description: Betrieb der Plattform, members: [anna, ben, chris] }
+  - { name: team-payments, description: Entwicklung Zahlungsverkehr, members: [dora, emil, fatima, georg, hanna] }
+  - { name: team-checkout, description: Entwicklung Bestellprozess, members: [ivan, julia, kemal, lena, mario] }
+  - { name: team-data, description: Datenplattform, members: [nina, oskar, petra, quentin] }
+  - { name: release-managers, description: Freigabe von Releases, members: [ben, hanna, lena] }
+  - { name: security-auditors, description: Nur lesender Zugriff, members: [rita, stefan] }
+  - { name: ci-robots, description: Technische Konten der Pipelines, members: [ci-payments, ci-checkout, ci-data] }
+
+# Permission targets of the container source. One carries an exclude pattern on purpose.
+artifactory_migration_jcr_permissions:
+  - name: base-images-read
+    resources:
+      artifact:
+        actions:
+          users: {}
+          groups:
+            team-payments: [READ]
+            team-checkout: [READ]
+            team-data: [READ]
+            security-auditors: [READ]
+            ci-robots: [READ]
+        targets:
+          docker-base:
+            include_patterns: ["**"]
+            exclude_patterns: []
+  - name: base-images-write
+    resources:
+      artifact:
+        actions:
+          users: {}
+          groups:
+            platform-admins: [READ, WRITE, DELETE, ANNOTATE, MANAGE]
+        targets:
+          docker-base:
+            include_patterns: ["**"]
+            exclude_patterns: []
+  - name: prod-images-release
+    resources:
+      artifact:
+        actions:
+          users:
+            ci-payments: [READ, WRITE]
+          groups:
+            release-managers: [READ, WRITE, DELETE, ANNOTATE]
+            security-auditors: [READ]
+        targets:
+          docker-prod:
+            include_patterns: ["**"]
+            exclude_patterns: []
+  - name: prod-images-no-data
+    resources:
+      artifact:
+        actions:
+          users: {}
+          groups:
+            team-checkout: [READ]
+        targets:
+          docker-prod:
+            include_patterns: ["**"]
+            exclude_patterns: ["data/**"]
+
 # Test data (lab only, playbooks/artifactory_seed.yml).
 artifactory_migration_seed_dir: /var/tmp/artifactory-seed
-artifactory_migration_seed_users:
-  - name: alice
-    group: developers
-  - name: bob
-    group: developers
-  - name: carol
-    group: release-managers

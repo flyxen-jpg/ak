@@ -1,0 +1,80 @@
+---
+# Repositories of the container source. JFrog Container Registry offers Docker, OCI, Helm and
+# Generic only. Payloads follow the internal UI API, as for the OSS data set.
+
+artifactory_migration_jcr_local_repos:
+  - key: docker-base
+    package_type: Docker
+    layout: simple-default
+    type_specific: &artifactory_migration_docker_local
+      dockerApiVersion: V2
+      dockerTagRetention: 1
+      maxUniqueTags: 0
+      blockPushingSchema1: true
+  - key: docker-prod
+    package_type: Docker
+    layout: simple-default
+    type_specific: *artifactory_migration_docker_local
+  - key: helm-local
+    package_type: Helm
+    layout: simple-default
+    type_specific: {}
+  - key: generic-tools
+    package_type: Generic
+    layout: simple-default
+    type_specific: {}
+
+artifactory_migration_jcr_remote_repo:
+  type: remoteRepoConfig
+  general:
+    repoKey: docker-hub
+  basic:
+    layout: simple-default
+    includesPattern: "**/*"
+    excludesPattern: ""
+    url: https://registry-1.docker.io/
+  advanced:
+    blackedOut: false
+    allowContentBrowsing: false
+    storeArtifactsLocally: true
+    propertySets: []
+    network:
+      socketTimeout: 15000
+      syncProperties: false
+      lenientHostAuth: false
+      cookieManagement: false
+    cache:
+      keepUnusedArtifactsHours: 0
+      retrievalCachePeriodSecs: 7200
+      assumedOfflineLimitSecs: 300
+      missedRetrievalCachePeriodSecs: 1800
+  typeSpecific:
+    repoType: Docker
+    url: https://registry-1.docker.io/
+    enableTokenAuthentication: true
+    blockPushingSchema1: true
+
+artifactory_migration_jcr_virtual_repo:
+  type: virtualRepoConfig
+  general:
+    repoKey: docker-all
+  basic:
+    layout: simple-default
+    includesPattern: "**/*"
+    excludesPattern: ""
+    selectedRepositories:
+      - repoName: docker-prod
+        type: local
+      - repoName: docker-base
+        type: local
+      - repoName: docker-hub
+        type: remote
+    defaultDeploymentRepo: docker-prod
+  advanced:
+    retrieveRemoteArtifacts: true
+    hideUnauthorizedResources: false
+    signedUrlTtl: 90
+    priorityResolution: false
+  typeSpecific:
+    repoType: Docker
+    resolveDockerTagsByTimestamp: false

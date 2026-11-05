@@ -78,8 +78,15 @@
     artifactory_migration_ak_groups: "{{ artifactory_migration_target.results[1].json['items'] | items2dict(key_name='name', value_name='id') }}"
     artifactory_migration_ak_repos: "{{ artifactory_migration_target.results[2].json['items'] | items2dict(key_name='key', value_name='id') }}"
 
+# With an identity provider, users and groups come from the first login. Local accounts and
+# groups with the same names would block that login or the group membership.
 - name: Import user and group tasks
   ansible.builtin.import_tasks: security_principals.yml
+  when: artifactory_migration_identity_mode == 'local'
 
 - name: Import permission tasks
   ansible.builtin.import_tasks: security_permissions.yml
+
+- name: Import group verification tasks
+  ansible.builtin.import_tasks: verify_groups.yml
+  when: artifactory_migration_identity_mode == 'local'

@@ -1,0 +1,31 @@
+---
+# A registry client gets its token from the address in the WWW-Authenticate header, and Artifact
+# Keeper builds that address from AK_EXTERNAL_URL. In the NAT Network lab this is a port on the
+# host, which does not exist on the runner. Production uses a DNS name that every client can
+# resolve, so artifactory_migration_token_proxy stays empty there. In the lab a transient unit
+# forwards the same port on the runner to the VIP for the duration of a test.
+
+- name: Install socat for the token proxy
+  become: true
+  ansible.builtin.dnf:
+    name: socat
+    state: present
+  when: artifactory_migration_token_proxy | length > 0
+
+- name: Start the token proxy
+  become: true
+  ansible.builtin.command:
+    argv:
+      - systemd-run
+      - --unit=ak-token-proxy
+      - --collect
+      - socat
+      - TCP-LISTEN:{{ artifactory_migration_token_proxy }},bind=127.0.0.1,fork,reuseaddr
+      - TCP:{{ artifactory_migration_token_proxy_target }}
+  when: artifactory_migration_token_proxy | length > 0
+  register: artifactory_migration_proxy_start
+  changed_when: artifactory_migration_proxy_start.rc == 0
+  # Already running after an interrupted run: the unit name is taken, the proxy is usable.
+  failed_when:
+    - artifactory_migration_proxy_start.rc != 0
+    - "'already' not in artifactory_migration_proxy_start.stderr"

@@ -53,9 +53,9 @@
     headers: "{{ artifactory_migration_rt_ui }}"
     body_format: json
     body:
-      username: "{{ item.name }}"
-      email: "{{ item.name }}@lab.local"
-      password: "Lab-Passw0rd-{{ item.name }}!"
+      username: "{{ item }}"
+      email: "{{ item }}@lab.local"
+      password: "Lab-Passw0rd-{{ item }}!"
       admin: false
       profileUpdatable: true
       disableUiAccess: false
@@ -64,8 +64,8 @@
     status_code: [200, 201, 409]
   loop: "{{ artifactory_migration_seed_users }}"
   loop_control:
-    label: "{{ item.name }}"
-  when: item.name not in artifactory_migration_rt_users
+    label: "{{ item }}"
+  when: item not in artifactory_migration_rt_users
   register: artifactory_migration_create
   until: artifactory_migration_create.status | default(0) in [200, 201, 409]
   retries: 4
@@ -88,8 +88,7 @@
 
 - name: Set group memberships
   vars:
-    artifactory_migration_wanted: >-
-      {{ artifactory_migration_seed_users | selectattr('group', 'equalto', item.item.name) | map(attribute='name') | sort }}
+    artifactory_migration_wanted: "{{ item.item.members | sort }}"
   ansible.builtin.uri:
     url: "{{ artifactory_migration_rt_url }}/ui/api/v1/access/api/ui/groups/{{ item.item.name }}"
     method: PUT

@@ -1,0 +1,40 @@
+---
+# Independent check of the group migration: the members of every group are read back from
+# Artifact Keeper and compared with the membership that Artifactory reports.
+
+- name: Read groups of Artifact Keeper after the migration
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_ak_url }}/api/v1/groups/{{ artifactory_migration_ak_groups[item] }}?member_limit=200"
+    headers: "{{ artifactory_migration_ak_auth }}"
+  loop: "{{ artifactory_migration_src_membership.keys() | select('in', artifactory_migration_ak_groups) | list }}"
+  register: artifactory_migration_group_check
+
+- name: Compare group members
+  vars:
+    artifactory_migration_names: "{{ artifactory_migration_ak_users | dict2items | items2dict(key_name='value', value_name='key') }}"
+  ansible.builtin.set_fact:
+    artifactory_migration_group_diff: >-
+      {%- set out = [] -%}
+      {%- for r in artifactory_migration_group_check.results -%}
+      {%- set have = r.json.members | default([]) | map(attribute='user_id') | map('extract', artifactory_migration_names) | sort | list -%}
+      {%- set want = artifactory_migration_src_membership[r.item] | sort | list -%}
+      {%- set _ = out.append({'group': r.item, 'members': want | length, 'missing': want | difference(have), 'extra': have | difference(want)}) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Show the group comparison
+  ansible.builtin.debug:
+    msg: "{{ item.group }}: {{ item.members }} members, missing {{ item.missing }}, additional {{ item.extra }}"
+  loop: "{{ artifactory_migration_group_diff }}"
+  loop_control:
+    label: "{{ item.group }}"
+
+- name: Fail on different group members
+  ansible.builtin.assert:
+    that:
+      - artifactory_migration_group_diff | map(attribute='missing') | flatten | length == 0
+      - artifactory_migration_group_diff | map(attribute='extra') | flatten | length == 0
+      # The built-in group "readers" has no equivalent, see security_principals.yml.
+      - artifactory_migration_src_membership.keys() | reject('in', artifactory_migration_ak_groups) | reject('equalto', 'readers') | list | length == 0
+    fail_msg: Groups in Artifact Keeper differ from the source (see above).
+    quiet: true

@@ -55,6 +55,22 @@
   loop_control:
     label: "{{ item.permission }}/{{ item.repo }}/{{ item.who }}"
 
+# Rights in Artifactory add up across permission targets. Artifact Keeper allows one rule per
+# principal and repository, so the actions of all usable targets are merged into that rule.
+- name: Merge rules of the same principal and repository
+  ansible.builtin.set_fact:
+    artifactory_migration_rules_merged: >-
+      {%- set merged = {} -%}
+      {%- for r in artifactory_migration_rules_resolved -%}
+      {%- if r.repo_id is not none and r.principal_id is not none
+            and (artifactory_migration_security_mode != 'strict' or not r.patterned) -%}
+      {%- set key = r.principal_id ~ '/' ~ r.repo_id -%}
+      {%- set known = merged[key].actions if key in merged else [] -%}
+      {%- set _ = merged.update({key: r | combine({'actions': (known + r.actions) | unique | sort | list})}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ merged.values() | list }}
+
 - name: Read existing rules
   ansible.builtin.uri:
     url: "{{ artifactory_migration_ak_url }}/api/v1/permissions?per_page=500"
@@ -74,11 +90,7 @@
       target_id: "{{ item.repo_id }}"
       actions: "{{ item.actions }}"
     status_code: [200, 201]
-  loop: >-
-    {{ artifactory_migration_rules_resolved | rejectattr('repo_id', 'none') | rejectattr('principal_id', 'none')
-       | rejectattr('patterned', 'equalto', artifactory_migration_security_mode == 'strict') | list
-       if artifactory_migration_security_mode == 'strict'
-       else artifactory_migration_rules_resolved | rejectattr('repo_id', 'none') | rejectattr('principal_id', 'none') | list }}
+  loop: "{{ artifactory_migration_rules_merged }}"
   loop_control:
     label: "{{ item.principal_type }} {{ item.who }} -> {{ item.repo }} {{ item.actions }}"
   when: >-

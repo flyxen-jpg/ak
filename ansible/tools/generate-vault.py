@@ -61,6 +61,10 @@ def main():
         "vault_ak_standalone_db_password": pw(32),
         "vault_artifactory_oss_db_password": pw(32),
         "vault_artifactory_oss_admin_password": "Rt-" + pw(20) + "!",
+        # Single sign-on test with Keycloak (playbooks/keycloak.yml).
+        "vault_keycloak_admin_password": pw(24),
+        "vault_keycloak_client_secret": pw(40),
+        "vault_keycloak_test_password": pw(24),
     }
     plain = "---\n# Encrypted secrets, referenced from secrets.yml. Edit with: ansible-vault edit <file>\n"
     plain += "".join(f'{k}: "{v}"\n' for k, v in values.items())

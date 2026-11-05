@@ -2,11 +2,13 @@
 
 [Zurück: Migration](03-migration.md) | [Übersicht](README.md) | [Weiter: Testprotokoll](05-testprotokoll.md)
 
-## Lässt sich Artifact Keeper hochverfügbar betreiben?
+Dieses Kapitel beschreibt die getestete Architektur. Die Knotennamen stammen aus dem ersten Laboraufbau (`ak-node1`, `ak-node2`, `rocky10`). Der später mit Ansible aufgebaute Cluster nutzt `ak-ha1`, `ak-ha2` und `ak-ha3`. Die Dienste sind dieselben. Eine Erklärung der Begriffe steht in den [Grundlagen](grundlagen/03-hochverfuegbarkeit.md).
 
-Ja, und zwar aktiv/aktiv. Das Backend hält keinen eigenen Zustand. Metadaten liegen in PostgreSQL, Artefakte in einem Objektspeicher (S3, GCS, Azure) oder auf einem gemeinsamen Dateisystem, die Suche in OpenSearch. Tokens werden mit einem gemeinsamen `JWT_SECRET` signiert, Sticky Sessions sind daher nicht nötig. Hintergrundjobs wie RPM-Retention, LDAP-Abgleich oder das Füllen des Pull-Through-Caches stimmen sich über PostgreSQL ab (Leases und Advisory Locks). Das offizielle Helm-Chart sieht für die Produktion mindestens drei Replikas vor.
+## Betriebsmodell
 
-Für seine Abhängigkeiten bringt Artifact Keeper keine Hochverfügbarkeit mit. PostgreSQL, Objektspeicher und OpenSearch müssen selbst ausfallsicher sein, und darin liegt der eigentliche Aufwand. Zum Vergleich: Bei Artifactory setzt Hochverfügbarkeit eine Enterprise-Lizenz voraus, OSS und Pro bieten sie nicht.
+Artifact Keeper läuft aktiv/aktiv. Das Backend hält keinen eigenen Zustand. Metadaten liegen in PostgreSQL, Artefakte in einem Objektspeicher (S3, GCS, Azure) oder auf einem gemeinsamen Dateisystem, die Suche in OpenSearch. Tokens werden mit einem gemeinsamen `JWT_SECRET` signiert, Sticky Sessions sind daher nicht nötig. Hintergrundjobs wie RPM Retention, LDAP Abgleich oder das Füllen des Pull Through Caches stimmen sich über PostgreSQL ab (Leases und Advisory Locks). Das offizielle Helm Chart sieht für die Produktion mindestens drei Replikas vor.
+
+Für seine Abhängigkeiten bringt Artifact Keeper keine Hochverfügbarkeit mit. PostgreSQL, Objektspeicher und OpenSearch müssen selbst ausfallsicher sein, und darin liegt der eigentliche Aufwand. Zum Vergleich: Bei Artifactory setzt Hochverfügbarkeit eine Enterprise Lizenz voraus, OSS und Pro bieten sie nicht.
 
 ## Architektur im Labor
 
@@ -43,29 +45,29 @@ flowchart TB
 | Schicht | Komponente | Mechanismus | Verkraftet |
 |---|---|---|---|
 | Einstieg | keepalived 2.2.8 (VRRP unicast) | Die VIP wandert, `track_process haproxy`, `nopreempt` | Ausfall eines Knotens oder von HAProxy |
-| Load Balancer | HAProxy 3.0.5 auf jedem Knoten | Health-Checks auf `/readyz` (API), `/` (Web), Patroni `/primary` (Datenbank), Garage `/health` und OpenSearch `/_cluster/health` | Ausfall eines Backends |
+| Load Balancer | HAProxy 3.0.5 auf jedem Knoten | Health Checks auf `/readyz` (API), `/` (Web), Patroni `/primary` (Datenbank), Garage `/health` und OpenSearch `/_cluster/health` | Ausfall eines Backends |
 | Anwendung | Backend und Web von Artifact Keeper 1.11.11, rootless Podman | aktiv/aktiv, Round Robin | Ausfall eines Knotens |
-| Datenbank | PostgreSQL 18.6 mit Patroni 4.1.5 (PGDG) | Streaming-Replikation, automatischer Failover, `pg_rewind` | Ausfall des Primary |
+| Datenbank | PostgreSQL 18.6 mit Patroni 4.1.5 (PGDG) | Streaming Replikation, automatischer Failover, `pg_rewind` | Ausfall des Primary |
 | DCS | etcd 3.6.16 mit drei Mitgliedern im Container | Raft, Quorum zwei von drei | Ausfall eines Knotens |
 | Objektspeicher | Garage 2.5.0 auf drei Knoten | dreifache Replikation, Quorum zwei von drei | Ausfall eines Knotens |
-| Suche | OpenSearch 2.19.6 auf drei Knoten | Replikas, Wahl des Cluster-Managers | Ausfall eines Knotens |
+| Suche | OpenSearch 2.19.6 auf drei Knoten | Replikas, Wahl des Cluster Managers | Ausfall eines Knotens |
 
 ### Warum drei Knoten?
 
-Systeme mit Quorum wie etcd, Garage und OpenSearch brauchen eine ungerade Zahl von Stimmen. Andernfalls kann bei einer Netztrennung keine Hälfte weiterarbeiten, oder es droht ein Split-Brain. Der dritte Knoten `rocky10` trägt im Labor nur die Quorum-Dienste. In der Produktion eignen sich drei gleichwertige Knoten oder ein kleiner dritter Knoten als Witness.
+Systeme mit Quorum wie etcd, Garage und OpenSearch brauchen eine ungerade Zahl von Stimmen. Andernfalls kann bei einer Netztrennung keine Hälfte weiterarbeiten, oder es droht ein Split Brain. Der dritte Knoten `rocky10` trägt im Labor nur die Quorum Dienste. In der Produktion eignen sich drei gleichwertige Knoten oder ein kleiner dritter Knoten als Witness.
 
 ### Warum Garage statt MinIO?
 
-MinIO veröffentlicht seit Ende 2025 keine Community-Images mehr. `docker.io/minio/minio` liefert 404, verfügbar sind nur noch der Quellcode und das kommerzielle AIStor. Für einen Neuaufbau im Jahr 2026 ist das keine tragfähige Grundlage. Garage steht unter AGPL, wird aktiv gepflegt, ist für kleine selbst betriebene Cluster gebaut und braucht etwa 40 MB RAM. Im Unternehmensumfeld kommen auch Ceph RGW, NetApp StorageGRID oder S3 aus der Cloud in Frage.
+MinIO veröffentlicht seit Ende 2025 keine Community Images mehr. `docker.io/minio/minio` liefert 404, verfügbar sind nur noch der Quellcode und das kommerzielle AIStor. Für einen Neuaufbau im Jahr 2026 ist das keine tragfähige Grundlage. Garage steht unter AGPL, wird aktiv gepflegt, ist für kleine selbst betriebene Cluster gebaut und braucht etwa 40 MB RAM. Im Unternehmensumfeld kommen auch Ceph RGW, NetApp StorageGRID oder S3 aus der Cloud in Frage.
 
 ### Gemeinsamer Speicher: S3 oder NFS?
 
 | | S3 (Garage, Ceph, Cloud) | NFS |
 |---|---|---|
-| Konfiguration | `STORAGE_BACKEND=s3` und die Variablen `S3_*` | `STORAGE_BACKEND=filesystem`, `STORAGE_PATH` auf dem NFS-Mount, auf allen Knoten gleich |
+| Konfiguration | `STORAGE_BACKEND=s3` und die Variablen `S3_*` | `STORAGE_BACKEND=filesystem`, `STORAGE_PATH` auf dem NFS Mount, auf allen Knoten gleich |
 | Ausfallsicherheit | eingebaut durch Replikation und Quorum | nur so gut wie das NAS. Ohne hochverfügbares NAS ist es ein Single Point of Failure. |
-| Betrieb | eigener Cluster oder Cloud | vorhandene NAS-Infrastruktur nutzbar |
-| Besonderheit | Die REST-API für Downloads ist auf 30 Anfragen pro Minute und IP begrenzt, die nativen Endpunkte nicht. | Bei rootless Podman muss die UID-Zuordnung auf allen Knoten gleich sein, dazu das SELinux-Boolean `virt_use_nfs`. |
+| Betrieb | eigener Cluster oder Cloud | vorhandene NAS Infrastruktur nutzbar |
+| Besonderheit | Die REST API für Downloads ist auf 30 Anfragen pro Minute und IP begrenzt, die nativen Endpunkte nicht. | Bei rootless Podman muss die UID Zuordnung auf allen Knoten gleich sein, dazu das SELinux Boolean `virt_use_nfs`. |
 | Empfehlung | Standard für mehrere Replikas | nur, wenn ein hochverfügbares NAS vorhanden ist |
 
 ## Konfiguration in Auszügen
@@ -87,7 +89,7 @@ vrrp_instance VI_AK {
 }
 ```
 
-Die Firewall muss VRRP zulassen (`firewall-cmd --add-rich-rule='rule protocol value="vrrp" accept'`). Bevor eine VIP gesetzt wird, sollte man prüfen, ob die Adresse frei ist (`arping -D`). Im Labor kollidierte die erste Wahl `.100` mit dem DHCP-Server von VirtualBox.
+Die Firewall muss VRRP zulassen (`firewall-cmd --add-rich-rule='rule protocol value="vrrp" accept'`). Bevor eine VIP gesetzt wird, sollte man prüfen, ob die Adresse frei ist (`arping -D`). Im Labor kollidierte die erste Wahl `.100` mit dem DHCP Server von VirtualBox.
 
 ### HAProxy (`lab/ha/haproxy.cfg.tpl`)
 
@@ -128,10 +130,10 @@ Für mehrere Replikas sind die folgenden Werte Pflicht, und zwar auf allen Knote
 | `MIGRATION_ENCRYPTION_KEY`, `SSO_ENCRYPTION_KEY`, `AK_WEBHOOK_SECRET_KEY` | Verschlüsselte Felder in der Datenbank müssen auf jedem Knoten lesbar sein. Jeder Wert ist Base64 von genau 32 Byte. |
 | `DATABASE_URL=...@<knoten-ip>:5000/...?sslmode=require` | Die Datenbank wird immer über den lokalen HAProxy und damit über den aktuellen Primary angesprochen. |
 | `STORAGE_BACKEND=s3`, `S3_ENDPOINT=http://<knoten-ip>:3910` | gemeinsamer Objektspeicher |
-| `OPENSEARCH_URL=http://<knoten-ip>:9201` | OpenSearch-Cluster |
-| `PROXY_SINGLEFLIGHT_ADVISORY_LOCKS_ENABLED=true` | Der Cache der Remote-Repositories wird clusterweit nur einmal gefüllt. |
+| `OPENSEARCH_URL=http://<knoten-ip>:9201` | OpenSearch Cluster |
+| `PROXY_SINGLEFLIGHT_ADVISORY_LOCKS_ENABLED=true` | Der Cache der Remote Repositories wird clusterweit nur einmal gefüllt. |
 | `DATABASE_MAX_CONNECTIONS=20` | Replikas mal Pool plus Reserve muss unter `max_connections` (200) bleiben. |
-| `RATE_LIMIT_TRUSTED_PROXY_CIDRS=192.168.56.0/24`, `XFF_TRUSTED_FOR_AUTHZ=true` | echte Client-IP hinter HAProxy |
+| `RATE_LIMIT_TRUSTED_PROXY_CIDRS=192.168.56.0/24`, `XFF_TRUSTED_FOR_AUTHZ=true` | echte Client IP hinter HAProxy |
 | `AK_EXTERNAL_URL=http://192.168.56.50` | öffentliche URL für Weiterleitungen und SSO |
 
 ## Aufbau
@@ -142,10 +144,10 @@ powershell -ExecutionPolicy Bypass -File vm\deploy-ha.ps1             # etcd, Ga
 powershell -ExecutionPolicy Bypass -File vm\ha-watch.ps1              # Live-Status
 ```
 
-Derselbe Aufbau ist als Ansible-Projekt automatisiert, siehe [08](08-ansible.md).
+Derselbe Aufbau ist als Ansible Projekt automatisiert, siehe [08](08-ansible.md).
 
 ## Bewusste Vereinfachungen im Labor
 
-* TLS gibt es nur zwischen Artifact Keeper und PostgreSQL. VIP, S3, etcd und OpenSearch laufen im Labor unverschlüsselt. In der Produktion gehören TLS am HAProxy-Frontend (`bind *:443 ssl crt ...`), mTLS für etcd und die RPC-Verbindungen von Garage sowie das Security-Plugin von OpenSearch dazu.
+* TLS gibt es nur zwischen Artifact Keeper und PostgreSQL. VIP, S3, etcd und OpenSearch laufen im Labor unverschlüsselt. In der Produktion gehören TLS am HAProxy Frontend (`bind *:443 ssl crt ...`), mTLS für etcd und die RPC Verbindungen von Garage sowie das Security Plugin von OpenSearch dazu.
 * OpenSearch läuft mit 256 MB Heap, Patroni ohne synchrone Replikation (`synchronous_mode: false`). Bei einem Failover können theoretisch wenige Millisekunden bestätigter Transaktionen verloren gehen (`maximum_lag_on_failover`). Wer keinerlei Datenverlust akzeptiert, setzt `synchronous_mode: true` und nimmt eine höhere Schreiblatenz in Kauf.
 * Backups mit pgBackRest oder Versionierung im Bucket sind nicht Teil des Labors. Empfehlungen dazu stehen im [Betriebshandbuch](07-betrieb.md).

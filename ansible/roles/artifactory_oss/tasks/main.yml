@@ -93,3 +93,7 @@
 
 - name: Import admin password tasks
   ansible.builtin.import_tasks: admin_password.yml
+
+- name: Import license agreement tasks
+  ansible.builtin.import_tasks: eula.yml
+  when: artifactory_oss_edition == 'artifactory-jcr'

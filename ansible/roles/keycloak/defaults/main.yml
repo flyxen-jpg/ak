@@ -1,0 +1,33 @@
+---
+# Keycloak as identity provider for testing single sign-on with OpenID Connect.
+# It runs in development mode with its embedded database: enough for a test of the login flow
+# and the group mapping, not for production, where the existing identity provider is used.
+keycloak_image: quay.io/keycloak/keycloak:26.1.4
+keycloak_http_port: 8080
+keycloak_config_dir: /etc/keycloak
+# Address that both the Artifact Keeper backends and the users reach. It becomes the issuer.
+keycloak_url: "http://{{ ansible_host }}:{{ keycloak_http_port }}"
+keycloak_java_opts: "-Xms256m -Xmx640m"
+keycloak_firewall_zone: public
+
+keycloak_realm: lab
+keycloak_client_id: artifact-keeper
+keycloak_redirect_uris:
+  - "{{ ak_external_url | default('http://localhost:30080') }}/api/v1/auth/sso/oidc/callback"
+
+# Groups use the names of the migrated groups on purpose, so rules attached to the migrated
+# groups also apply to users that come from the identity provider.
+# dora and anna exist as migrated local users, zoe and yusuf only in Keycloak.
+# group-seed is a technical user in all groups. One login creates every group in Artifact
+# Keeper at once, so rules can be attached before the real users log in.
+keycloak_groups:
+  - { name: platform-admins, members: [anna, group-seed] }
+  - { name: team-payments, members: [dora, yusuf, group-seed] }
+  - { name: team-checkout, members: [group-seed] }
+  - { name: team-data, members: [zoe, group-seed] }
+  - { name: release-managers, members: [yusuf, group-seed] }
+  - { name: security-auditors, members: [rita, group-seed] }
+  - { name: ci-robots, members: [group-seed] }
+
+# Required secrets (vault): keycloak_admin_password, keycloak_client_secret,
+# keycloak_test_password.

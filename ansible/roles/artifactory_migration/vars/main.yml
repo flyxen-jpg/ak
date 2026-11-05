@@ -125,8 +125,13 @@ artifactory_migration_seed_remote_paths:
 artifactory_migration_seed_groups:
   - name: developers
     description: Entwickler
+    members: [alice, bob]
   - name: release-managers
     description: Release-Team
+    members: [carol]
+
+# Every member of a seed group becomes a user; a user can be in several groups.
+artifactory_migration_seed_users: "{{ artifactory_migration_seed_groups | map(attribute='members') | flatten | unique }}"
 
 # Permission targets as in the evaluation: one with an exclude pattern (not mappable).
 artifactory_migration_seed_permissions:
@@ -161,10 +166,12 @@ artifactory_migration_seed_permissions:
             include_patterns: ["**"]
             exclude_patterns: []
 
-# Artifactory action -> Artifact Keeper action.
+# Artifactory action -> Artifact Keeper action. ANNOTATE only changes properties in Artifactory
+# and Artifact Keeper has no such action; mapping it to write would allow uploads, so the user
+# gets read, as in the map_permission function of Artifact Keeper.
 artifactory_migration_action_map:
   READ: read
   WRITE: write
-  ANNOTATE: write
+  ANNOTATE: read
   DELETE: delete
   MANAGE: admin

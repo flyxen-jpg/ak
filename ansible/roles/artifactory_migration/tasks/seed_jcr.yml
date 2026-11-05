@@ -1,0 +1,200 @@
+---
+# Test data of the container source (lab only): repositories, production images with pinned
+# tags, well known files, whole user groups and permission targets. Every step checks the
+# current state first, so the play can run repeatedly.
+
+- name: Load the repository definitions of the container source
+  ansible.builtin.include_vars: jcr.yml
+
+- name: Install skopeo
+  become: true
+  ansible.builtin.dnf:
+    name: skopeo
+    state: present
+
+- name: Import login tasks
+  ansible.builtin.import_tasks: login.yml
+
+- name: Read existing repositories
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_rt_url }}/artifactory/api/repositories"
+    url_username: "{{ artifactory_migration_rt_user }}"
+    url_password: "{{ artifactory_migration_rt_password }}"
+    force_basic_auth: true
+  register: artifactory_migration_rt_repos
+  # The UI API of Artifactory occasionally stalls on single requests; retry instead of waiting long.
+  until: artifactory_migration_rt_repos.status | default(0) == 200
+  retries: 4
+  delay: 5
+
+- name: Remember existing repository keys
+  ansible.builtin.set_fact:
+    artifactory_migration_rt_repo_keys: "{{ artifactory_migration_rt_repos.json | map(attribute='key') | list }}"
+
+- name: Create local repositories
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_rt_url }}/ui/api/v1/ui/admin/repositories"
+    method: POST
+    headers: "{{ artifactory_migration_rt_ui }}"
+    body_format: json
+    body:
+      type: localRepoConfig
+      general:
+        repoKey: "{{ item.key }}"
+      basic:
+        layout: "{{ item.layout }}"
+        includesPattern: "**/*"
+        excludesPattern: ""
+      advanced:
+        blackedOut: false
+        allowContentBrowsing: false
+        propertySets: []
+      typeSpecific: "{{ {'repoType': item.package_type} | combine(item.type_specific) }}"
+    # 409: already exists (also after a request that stalled but was processed).
+    status_code: [200, 201, 409]
+  loop: "{{ artifactory_migration_jcr_local_repos }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: item.key not in artifactory_migration_rt_repo_keys
+  register: artifactory_migration_create
+  until: artifactory_migration_create.status | default(0) in [200, 201, 409]
+  retries: 4
+  delay: 5
+  changed_when: artifactory_migration_create.status in [200, 201]
+
+- name: Create remote and virtual repositories
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_rt_url }}/ui/api/v1/ui/admin/repositories"
+    method: POST
+    headers: "{{ artifactory_migration_rt_ui }}"
+    body_format: json
+    body: "{{ item }}"
+    # 409: already exists (also after a request that stalled but was processed).
+    status_code: [200, 201, 409]
+  loop:
+    - "{{ artifactory_migration_jcr_remote_repo }}"
+    - "{{ artifactory_migration_jcr_virtual_repo }}"
+  loop_control:
+    label: "{{ item.general.repoKey }}"
+  when: item.general.repoKey not in artifactory_migration_rt_repo_keys
+  register: artifactory_migration_create
+  until: artifactory_migration_create.status | default(0) in [200, 201, 409]
+  retries: 4
+  delay: 5
+  changed_when: artifactory_migration_create.status in [200, 201]
+
+- name: Create directory for test files
+  become: true
+  ansible.builtin.file:
+    path: "{{ artifactory_migration_seed_dir }}"
+    state: directory
+    mode: "0700"
+    owner: "{{ ansible_user }}"
+
+- name: Copy images and files into the source
+  block:
+    # An auth file keeps the password out of the process list and out of the task output.
+    - name: Write the registry auth file
+      ansible.builtin.copy:
+        dest: "{{ artifactory_migration_seed_dir }}/auth.json"
+        content: >-
+          {{ {'auths': {artifactory_migration_registry_host:
+             {'auth': (artifactory_migration_rt_user ~ ':' ~ artifactory_migration_rt_password) | b64encode}}} | to_json }}
+        mode: "0600"
+      no_log: true
+
+    - name: Check which images exist in the source
+      ansible.builtin.command:
+        argv:
+          - skopeo
+          - inspect
+          - --raw
+          - --tls-verify=false
+          - --authfile={{ artifactory_migration_seed_dir }}/auth.json
+          - docker://{{ artifactory_migration_registry_host }}/{{ item.repo }}/{{ item.name }}:{{ item.source | regex_replace('^.*:', '') }}
+      loop: "{{ artifactory_migration_images }}"
+      loop_control:
+        label: "{{ item.repo }}/{{ item.name }}:{{ item.source | regex_replace('^.*:', '') }}"
+      register: artifactory_migration_image_present
+      changed_when: false
+      failed_when: false
+
+    - name: Copy missing images into the source
+      ansible.builtin.command:
+        argv:
+          - skopeo
+          - copy
+          - --retry-times=3
+          - --dest-tls-verify=false
+          - --dest-authfile={{ artifactory_migration_seed_dir }}/auth.json
+          - --multi-arch={{ 'all' if item.item.multi_arch | default(false) else 'system' }}
+          - docker://{{ item.item.source }}
+          - docker://{{ artifactory_migration_registry_host }}/{{ item.item.repo }}/{{ item.item.name }}:{{ item.item.source | regex_replace('^.*:', '') }}
+      loop: "{{ artifactory_migration_image_present.results }}"
+      loop_control:
+        label: "{{ item.item.source }}"
+      when: item.rc != 0
+      changed_when: true
+
+    # The remote repository only stores what a client requested through it, so the layers
+    # are really downloaded instead of just reading the manifest.
+    - name: Fill the remote cache
+      ansible.builtin.command:
+        argv:
+          - skopeo
+          - copy
+          - --src-tls-verify=false
+          - --src-authfile={{ artifactory_migration_seed_dir }}/auth.json
+          - docker://{{ artifactory_migration_registry_host }}/docker-hub/{{ item }}
+          - oci-archive:{{ artifactory_migration_seed_dir }}/remote-cache.tar
+      loop: "{{ artifactory_migration_remote_images }}"
+      changed_when: false
+
+    - name: Download well known files
+      ansible.builtin.get_url:
+        url: "{{ item.url }}"
+        dest: "{{ artifactory_migration_seed_dir }}/{{ item.path | basename }}"
+        mode: "0644"
+      loop: "{{ artifactory_migration_downloads }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Check which files exist in the source
+      ansible.builtin.uri:
+        url: "{{ artifactory_migration_rt_url }}/artifactory/api/storage/{{ item.repo }}/{{ item.path }}"
+        url_username: "{{ artifactory_migration_rt_user }}"
+        url_password: "{{ artifactory_migration_rt_password }}"
+        force_basic_auth: true
+        status_code: [200, 404]
+      loop: "{{ artifactory_migration_downloads }}"
+      loop_control:
+        label: "{{ item.repo }}/{{ item.path }}"
+      register: artifactory_migration_file_present
+
+    - name: Upload missing files
+      ansible.builtin.uri:
+        url: "{{ artifactory_migration_rt_url }}/artifactory/{{ item.item.repo }}/{{ item.item.path }}"
+        method: PUT
+        src: "{{ artifactory_migration_seed_dir }}/{{ item.item.path | basename }}"
+        remote_src: true
+        url_username: "{{ artifactory_migration_rt_user }}"
+        url_password: "{{ artifactory_migration_rt_password }}"
+        force_basic_auth: true
+        status_code: [201]
+        timeout: 300
+      loop: "{{ artifactory_migration_file_present.results }}"
+      loop_control:
+        label: "{{ item.item.repo }}/{{ item.item.path }}"
+      when: item.status == 404
+      changed_when: true
+  always:
+    - name: Remove the registry auth file
+      ansible.builtin.file:
+        path: "{{ artifactory_migration_seed_dir }}/auth.json"
+        state: absent
+
+- name: Import security seed tasks
+  ansible.builtin.import_tasks: seed_security.yml
+  vars:
+    artifactory_migration_seed_groups: "{{ artifactory_migration_jcr_groups }}"
+    artifactory_migration_seed_permissions: "{{ artifactory_migration_jcr_permissions }}"

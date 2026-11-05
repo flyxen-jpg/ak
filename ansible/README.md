@@ -1,4 +1,4 @@
-# Ansible für den HA-Cluster mit Artifact Keeper
+# Ansible für den HA Cluster mit Artifact Keeper
 
 Dieses Projekt installiert den in `../docs/` beschriebenen hochverfügbaren Aufbau auf frisch installierte Hosts mit Rocky Linux 10 oder RHEL 10 Minimal, wahlweise mit Internet oder vollständig ohne Netzverbindung nach außen. Die Kommentare im Code sind auf Englisch.
 
@@ -14,7 +14,7 @@ Dieses Projekt installiert den in `../docs/` beschriebenen hochverfügbaren Aufb
 ## Voraussetzungen
 
 * Steuerknoten: Rocky Linux oder RHEL 10 mit `ansible-core` ab 2.16. Mehr ist nicht nötig, die Collections werden in `./collections` installiert.
-* Zielknoten: Minimalinstallation, Zugang per SSH-Schlüssel für einen Benutzer mit sudo ohne Passwort und eine statische IP im Clusternetz. Python 3 gehört zur Minimalinstallation.
+* Zielknoten: Minimalinstallation, Zugang per SSH Schlüssel für einen Benutzer mit sudo ohne Passwort und eine statische IP im Clusternetz. Python 3 gehört zur Minimalinstallation.
 
 ## Schnellstart mit Internet
 
@@ -27,16 +27,16 @@ ansible-playbook -i inventories/virtualbox-online/hosts.yml playbooks/site.yml
 
 ## Einzelner Host mit reinem NAT
 
-Artifact Keeper und auf Wunsch Artifactory OSS auf einer einzigen, von Hand installierten Rocky-VM. Ansible läuft auf der VM selbst.
+Artifact Keeper und auf Wunsch Artifactory OSS auf einer einzigen, von Hand installierten Rocky VM. Ansible läuft auf der VM selbst.
 
 ```bash
 tools/generate-vault.py inventories/standalone/group_vars/all/vault.yml
 ansible-playbook -i inventories/standalone/hosts.yml playbooks/standalone.yml -K
 ```
 
-## Hochverfügbarkeit im NAT-Netzwerk mit Management-VM
+## Hochverfügbarkeit im NAT Netzwerk mit Management VM
 
-Knoten von Hand installieren, alle im selben NAT-Netzwerk von VirtualBox, dann von der Management-VM aus:
+Knoten von Hand installieren, alle im selben NAT Netzwerk von VirtualBox, dann von der Management VM aus:
 
 ```bash
 tools/copy-ssh-keys.sh inventories/natnetwork/hosts.yml
@@ -48,9 +48,15 @@ ansible-playbook -i inventories/natnetwork/hosts.yml playbooks/artifactory.yml
 ## Migration aus Artifactory
 
 ```bash
-ansible-playbook -i inventories/<umgebung>/hosts.yml playbooks/artifactory_seed.yml   # Testdaten, nur im Labor
+ansible-playbook -i inventories/<umgebung>/hosts.yml playbooks/artifactory_seed.yml   # Testdaten für OSS, nur im Labor
+ansible-playbook -i inventories/<umgebung>/hosts.yml playbooks/jcr_seed.yml           # Testdaten für JCR: Images, Charts, Gruppen, nur im Labor
 ansible-playbook -i inventories/<umgebung>/hosts.yml playbooks/migrate.yml            # Artefakte, Prüfung, Rechte
+ansible-playbook -i inventories/<umgebung>/hosts.yml playbooks/migrate.yml --tags verify_images,verify_access   # Digest und Zugriffsmatrix
 ```
+
+## Keycloak und Nachweise
+
+`playbooks/keycloak.yml` installiert einen Test Identitätsanbieter. `tools/evidence/` enthält die Skripte, mit denen sich die Befunde aus `../docs/12-rechte-und-identitaeten.md` nachstellen lassen.
 
 ## Ohne Internet
 

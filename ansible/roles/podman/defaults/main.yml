@@ -3,6 +3,8 @@ podman_packages:
   - podman
   - passt
   - container-selinux
+  # Ansible needs setfacl for tasks that run as the unprivileged service account.
+  - acl
 
 # Unprivileged service account that owns and runs all containers (rootless Podman).
 # A container breakout therefore only reaches an account without sudo or login shell.

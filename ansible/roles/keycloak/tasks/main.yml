@@ -1,0 +1,95 @@
+---
+- name: Verify that the secrets are defined
+  ansible.builtin.assert:
+    that:
+      - keycloak_admin_password | length >= 12
+      - keycloak_client_secret | length >= 12
+      - keycloak_test_password | length >= 12
+    fail_msg: keycloak_admin_password, keycloak_client_secret and keycloak_test_password (12+ characters) must be set.
+    quiet: true
+  no_log: true
+
+- name: Open the web port
+  become: true
+  ansible.posix.firewalld:
+    zone: "{{ keycloak_firewall_zone }}"
+    port: "{{ keycloak_http_port }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+
+- name: Provide the container image
+  ansible.builtin.include_role:
+    name: podman
+    tasks_from: image.yml
+  vars:
+    podman_image: "{{ keycloak_image }}"
+
+# The realm file is mounted into the container, so the service account has to own it for the
+# SELinux relabeling (":Z"). It holds secrets, so nobody else may read it.
+- name: Create configuration directory
+  become: true
+  ansible.builtin.file:
+    path: "{{ keycloak_config_dir }}"
+    state: directory
+    owner: "{{ podman_user }}"
+    group: "{{ podman_user }}"
+    mode: "0750"
+
+- name: Write the environment file
+  become: true
+  ansible.builtin.template:
+    src: keycloak.env.j2
+    dest: "{{ keycloak_config_dir }}/keycloak.env"
+    owner: "{{ podman_user }}"
+    group: "{{ podman_user }}"
+    mode: "0600"
+  notify: Restart keycloak
+
+# Keycloak imports the realm only if it does not exist yet. A changed file therefore needs
+# the embedded database removed, which is acceptable for this test instance.
+- name: Write the realm definition
+  become: true
+  ansible.builtin.template:
+    src: realm.json.j2
+    dest: "{{ keycloak_config_dir }}/{{ keycloak_realm }}-realm.json"
+    owner: "{{ podman_user }}"
+    group: "{{ podman_user }}"
+    mode: "0600"
+  notify: Restart keycloak
+
+- name: Install the Quadlet unit
+  become: true
+  ansible.builtin.template:
+    src: keycloak.container.j2
+    dest: "{{ podman_quadlet_dir }}/keycloak.container"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart keycloak
+
+- name: Apply pending restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Start Keycloak
+  become: true
+  become_user: "{{ podman_user }}"
+  ansible.builtin.systemd_service:
+    name: keycloak.service
+    scope: user
+    state: started
+    daemon_reload: true
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ podman_user_uid }}"
+
+- name: Wait until the realm answers
+  ansible.builtin.uri:
+    url: "{{ keycloak_url }}/realms/{{ keycloak_realm }}/.well-known/openid-configuration"
+  register: keycloak_discovery
+  until: keycloak_discovery.status == 200
+  retries: 60
+  delay: 5
+
+- name: Show the issuer
+  ansible.builtin.debug:
+    msg: "Issuer: {{ keycloak_discovery.json.issuer }}"
