@@ -2,7 +2,7 @@
 
 [Zurück: Ansible](08-ansible.md) | [Übersicht](README.md) | [Weiter: Einzelknoten](10-einzelknoten.md)
 
-Der komplette Cluster lässt sich in einem Netz ohne jede Verbindung nach außen installieren, in VirtualBox ebenso wie auf jeder anderen Infrastruktur. Alles, was sonst aus dem Internet käme, wird vorher auf einem angebundenen Rechner in ein Offline Bundle gepackt.
+Der komplette Cluster lässt sich in einem Netz ohne jede Verbindung nach außen installieren, in VirtualBox ebenso wie auf jeder anderen Infrastruktur. Alles, was sonst aus dem Internet käme, wird vorher auf einem angebundenen Rechner in ein Offline Bundle gepackt. Für einen kleinen Testaufbau mit nur zwei VMs und zusätzlichen Einschränkungen gilt [Kapitel 13](13-airgap-zwei-vms.md).
 
 ## Vorbereitung
 

@@ -1,0 +1,27 @@
+---
+# Bash built-ins only: the check must work before any package is installed.
+- name: Try to reach public addresses
+  ansible.builtin.shell:
+    cmd: timeout 4 bash -c '</dev/tcp/{{ item }}/443'
+    executable: /bin/bash
+  loop: "{{ restricted_host_probe_ips }}"
+  register: restricted_host_probe_ip
+  changed_when: false
+  failed_when: false
+
+- name: Try to resolve public names
+  ansible.builtin.command: getent hosts {{ item }}
+  loop: "{{ restricted_host_probe_names }}"
+  register: restricted_host_probe_name
+  changed_when: false
+  failed_when: false
+
+- name: Stop when the host is not isolated
+  vars:
+    restricted_host_open: >-
+      {{ (restricted_host_probe_ip.results + restricted_host_probe_name.results)
+         | selectattr('rc', 'equalto', 0) | map(attribute='item') | list }}
+  ansible.builtin.assert:
+    that: restricted_host_open | length == 0
+    fail_msg: "Host reaches the outside ({{ restricted_host_open | join(', ') }}). Remove the route or set restricted_host_check_isolation to false."
+    quiet: true

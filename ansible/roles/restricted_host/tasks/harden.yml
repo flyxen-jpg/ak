@@ -1,0 +1,51 @@
+---
+# /tmp and /var/tmp without execution rights, as CIS benchmarks ask for. Ansible works in the
+# home directory (ansible.cfg, remote_tmp), so its modules are not affected.
+- name: Mount the temporary directories with restrictive options
+  become: true
+  ansible.posix.mount:
+    path: "{{ item }}"
+    src: tmpfs
+    fstype: tmpfs
+    opts: "{{ restricted_host_tmp_options }},size={{ restricted_host_tmp_size }}"
+    state: mounted
+  loop:
+    - /tmp
+
+- name: Mount /var/tmp with restrictive options
+  become: true
+  ansible.posix.mount:
+    path: /var/tmp
+    src: /var/tmp
+    fstype: none
+    opts: "bind,{{ restricted_host_tmp_options }}"
+    state: mounted
+
+- name: Set the file mode of sudo sessions
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/50-restricted
+    content: |
+      Defaults umask={{ restricted_host_umask }}
+      Defaults umask_override
+      Defaults logfile=/var/log/sudo.log
+    owner: root
+    group: root
+    mode: "0440"
+    validate: visudo -cf %s
+
+- name: Set the file mode of login shells
+  become: true
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: '^UMASK\s'
+    line: "UMASK {{ restricted_host_umask[1:] }}"
+
+# Root owned files that the service account must read (group bit) still work with 027, and
+# world readable system files are set explicitly by the roles.
+- name: Disable services that are of no use without network
+  become: true
+  ansible.builtin.systemd_service:
+    name: dnf-makecache.timer
+    state: stopped
+    enabled: false

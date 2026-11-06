@@ -1,0 +1,36 @@
+---
+# Environment settings: isolated network without gateway and DNS, software from the bundle.
+ak_offline: true
+ak_bundle_dir: /srv/ak-bundle
+ak_cluster_network: 192.168.56.0/24
+
+# Each VM runs one product, so the shared host role does not plan memory for both.
+standalone_artifactory_enabled: false
+standalone_host_min_free_gb: 15
+
+# JFrog: edition, license agreement for this lab instance, port open in the zone in use.
+artifactory_oss_edition: artifactory-jcr
+artifactory_oss_accept_eula: true
+
+# Artifact Keeper: the address clients use. The registry derives its token address from it.
+ak_external_url: "http://192.168.56.31:30080"
+ak_standalone_external_url: "{{ ak_external_url }}"
+ak_standalone_ssrf_allow_private_cidrs: 192.168.56.30/32
+
+# Migration, run on the JFrog VM.
+artifactory_migration_ak_url: "{{ ak_external_url }}"
+artifactory_migration_rt_url: "http://127.0.0.1:8082"
+artifactory_migration_source_url: "http://192.168.56.30:8082/artifactory"
+artifactory_migration_repos:
+  - docker-base
+  - docker-prod
+  - docker-hub
+  - helm-local
+  - generic-tools
+artifactory_migration_verify_skip_repos:
+  - docker-base
+  - docker-prod
+  - docker-hub
+artifactory_migration_verify_endpoints:
+  helm-local: helm
+  generic-tools: general

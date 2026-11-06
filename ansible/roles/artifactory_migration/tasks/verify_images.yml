@@ -2,11 +2,22 @@
 # Independent check of the container migration: for every pinned tag the manifest digest of
 # source and target must match, and the target must deliver all layers with a valid digest.
 
+- name: Install skopeo
+  become: true
+  ansible.builtin.dnf:
+    name: skopeo
+    state: present
+
 - name: Create work directory
   ansible.builtin.file:
     path: "{{ artifactory_migration_verify_dir }}-images"
     state: directory
     mode: "0700"
+
+# A foreign source has no list of test images, so the tags are read from the source itself.
+- name: Import image discovery tasks
+  ansible.builtin.import_tasks: discover_images.yml
+  when: artifactory_migration_discover_docker_repos | length > 0
 
 - name: Compare images
   block:
@@ -34,7 +45,7 @@
           {{ artifactory_migration_ak_registry }}/{{ item.repo }}/{{ item.name }}:{{ artifactory_migration_tag }}
           {{ artifactory_migration_verify_dir }}-images/auth.json
           {{ artifactory_migration_verify_dir }}-images
-      loop: "{{ artifactory_migration_images }}"
+      loop: "{{ artifactory_migration_discovered_images | default(artifactory_migration_images) }}"
       loop_control:
         label: "{{ item.repo }}/{{ item.name }}:{{ artifactory_migration_tag }}"
       register: artifactory_migration_image_results

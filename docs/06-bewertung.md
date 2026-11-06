@@ -59,6 +59,7 @@ Diese Schwächen haben sich gezeigt:
 | Risiko | Auswirkung | Maßnahme |
 |---|---|---|
 | unvollständige Migration der Rechte | Nach dem Umzug fehlen Rechte. | `playbooks/migrate.yml`, Zugriffsmatrix mit eigenen Fällen, siehe [12](12-rechte-und-identitaeten.md) |
+| Konto der Quelle sieht nicht alles | Der Job meldet Erfolg, Repositories fehlen. | Das Playbook vergleicht die Liste und bricht ab, siehe [13](13-airgap-zwei-vms.md) |
 | lokale Konten kollidieren mit dem Identitätsanbieter | Anmeldung scheitert mit 409, Gruppen bleiben leer. | Reihenfolge aus [12](12-rechte-und-identitaeten.md) einhalten, `artifactory_migration_identity_mode: idp` |
 | Entzug wirkt erst bei der nächsten Anmeldung | Ausgeschiedene behalten über Tokens Zugriff. | Austrittsprozess um Deaktivierung und Widerruf der Tokens ergänzen |
 | Remote Cache wird nicht migriert | Nicht mehr beim Upstream verfügbare Images gehen verloren. | Solche Images vorab in ein lokales Repository kopieren |

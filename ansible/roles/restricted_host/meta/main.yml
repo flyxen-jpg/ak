@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  author: Artifact Keeper lab
+  description: Checks isolation and applies time, hardening and outbound rules of a restrictive environment
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: EL
+      versions:
+        - "10"
+dependencies: []

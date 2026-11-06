@@ -15,7 +15,7 @@ VirtualBox kennt zwei NAT Varianten. Beim einfachen „NAT“ bekommt jede VM ei
 | ak-mgmt | 1 GB, mit Keycloak 2 GB | Management VM mit Ansible, optional Keycloak |
 | ak-ha1 | 2,5 GB | Artifact Keeper, PostgreSQL mit Patroni, HAProxy, keepalived, etcd, Garage, OpenSearch |
 | ak-ha2 | 2,5 GB | wie ak-ha1 |
-| ak-ha3 | 3,5 GB | dritte Stimme für etcd, Garage und OpenSearch, dazu JFrog Container Registry als Quelle der Migration. 3,5 GB sind knapp, die Oberfläche der Quelle hängt dann zeitweise. |
+| ak-ha3 | 3,5 GB | dritte Stimme für etcd, Garage und OpenSearch, dazu JFrog Container Registry als Quelle der Migration. 3,5 GB waren mit den früheren Einstellungen knapp, die Oberfläche der Quelle hing zeitweise. Das Speicherprofil aus [14](14-jfrog-tuning.md) ist inzwischen Standard der Rolle, in diesem Labor aber nicht erneut gemessen. |
 
 Alle VMs hängen am NAT Netzwerk `ak-natnet` mit dem Bereich 10.0.10.0/24. Die VIP liegt auf 10.0.10.250.
 

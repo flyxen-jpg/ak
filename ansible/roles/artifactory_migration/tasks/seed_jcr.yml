@@ -133,11 +133,37 @@
       loop: "{{ artifactory_migration_image_present.results }}"
       loop_control:
         label: "{{ item.item.source }}"
-      when: item.rc != 0
+      when:
+        - item.rc != 0
+        - not ak_offline | default(false) | bool
+      changed_when: true
+
+    # Without internet the images come from the bundle on the control node, one at a time, so
+    # the unpacked copy never needs more disk space than the largest image.
+    - name: Copy missing images from the bundle into the source
+      vars:
+        artifactory_migration_seed_name: "{{ item.item.source | regex_replace('[/:@]', '_') }}"
+      ansible.builtin.shell:
+        cmd: >-
+          set -e;
+          tar -xf {{ ak_bundle_dir }}/seed/images/{{ artifactory_migration_seed_name }}.tar;
+          skopeo copy --quiet --retry-times=3 --dest-tls-verify=false
+          --dest-authfile=auth.json
+          --multi-arch={{ 'all' if item.item.multi_arch | default(false) else 'system' }}
+          dir:{{ artifactory_migration_seed_name }}
+          docker://{{ artifactory_migration_registry_host }}/{{ item.item.repo }}/{{ item.item.name }}:{{ item.item.source | regex_replace('^.*:', '') }};
+          rm -rf {{ artifactory_migration_seed_name }}
+        chdir: "{{ artifactory_migration_seed_dir }}"
+      loop: "{{ artifactory_migration_image_present.results }}"
+      loop_control:
+        label: "{{ item.item.source }}"
+      when:
+        - item.rc != 0
+        - ak_offline | default(false) | bool
       changed_when: true
 
     # The remote repository only stores what a client requested through it, so the layers
-    # are really downloaded instead of just reading the manifest.
+    # are really downloaded instead of just reading the manifest. Impossible without internet.
     - name: Fill the remote cache
       ansible.builtin.command:
         argv:
@@ -149,6 +175,7 @@
           - oci-archive:{{ artifactory_migration_seed_dir }}/remote-cache.tar
       loop: "{{ artifactory_migration_remote_images }}"
       changed_when: false
+      when: not ak_offline | default(false) | bool
 
     - name: Download well known files
       ansible.builtin.get_url:
@@ -158,6 +185,17 @@
       loop: "{{ artifactory_migration_downloads }}"
       loop_control:
         label: "{{ item.path | basename }}"
+      when: not ak_offline | default(false) | bool
+
+    - name: Copy well known files from the bundle
+      ansible.builtin.copy:
+        src: "{{ ak_bundle_dir }}/seed/files/{{ item.path | basename }}"
+        dest: "{{ artifactory_migration_seed_dir }}/{{ item.path | basename }}"
+        mode: "0644"
+      loop: "{{ artifactory_migration_downloads }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      when: ak_offline | default(false) | bool
 
     - name: Check which files exist in the source
       ansible.builtin.uri:

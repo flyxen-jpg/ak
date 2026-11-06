@@ -1,0 +1,48 @@
+---
+- name: Install nftables
+  become: true
+  ansible.builtin.dnf:
+    name: nftables
+    state: present
+
+- name: Write outbound rules
+  become: true
+  ansible.builtin.template:
+    src: ak-egress.nft.j2
+    dest: "{{ restricted_host_egress_file }}"
+    owner: root
+    group: root
+    mode: "0640"
+    validate: nft -c -f %s
+  register: restricted_host_egress_rules
+
+- name: Install the unit that loads the outbound rules
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/ak-egress.service
+    content: |
+      [Unit]
+      Description=Deny outbound traffic except for allowed networks
+      Before=network-pre.target
+      Wants=network-pre.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=true
+      ExecStart=/usr/sbin/nft -f {{ restricted_host_egress_file }}
+      ExecStop=/usr/sbin/nft delete table inet ak_egress
+
+      [Install]
+      WantedBy=multi-user.target
+    owner: root
+    group: root
+    mode: "0644"
+  register: restricted_host_egress_unit
+
+- name: Load the outbound rules
+  become: true
+  ansible.builtin.systemd_service:
+    name: ak-egress.service
+    state: "{{ 'restarted' if restricted_host_egress_rules is changed or restricted_host_egress_unit is changed else 'started' }}"
+    enabled: true
+    daemon_reload: true

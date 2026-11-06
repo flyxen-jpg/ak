@@ -61,6 +61,8 @@ def main():
         "vault_ak_standalone_db_password": pw(32),
         "vault_artifactory_oss_db_password": pw(32),
         "vault_artifactory_oss_admin_password": "Rt-" + pw(20) + "!",
+        # Account on a foreign JFrog (inventories/airgap-external): set the real value afterwards.
+        "vault_external_jfrog_password": "change-me",
         # Single sign-on test with Keycloak (playbooks/keycloak.yml).
         "vault_keycloak_admin_password": pw(24),
         "vault_keycloak_client_secret": pw(40),

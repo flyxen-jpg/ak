@@ -4,6 +4,12 @@
 #
 #   ansible-playbook playbooks/bundle.yml [-e bundle_dir=/srv/ak-bundle]
 #
+# Profiles (see docs/13-airgap-zwei-vms.md):
+#   cluster  HA cluster on several nodes (default)
+#   two_vm   Artifact Keeper on one VM. With bundle_jfrog=true also JFrog on a second VM and
+#            test data for the migration; with false the source runs on a foreign server.
+#     ansible-playbook playbooks/bundle.yml -e bundle_profile=two_vm [-e bundle_jfrog=false]
+#
 # Single source of truth: package lists and image names are read from the role defaults,
 # so the bundle always matches exactly what the roles will install.
 - name: Build offline bundle
@@ -13,16 +19,31 @@
   vars:
     bundle_dir: /srv/ak-bundle
     bundle_project_dir: "{{ playbook_dir | dirname }}"
-    bundle_role_defaults:
-      - base
-      - podman
-      - etcd
-      - garage
-      - opensearch
-      - patroni
-      - haproxy
-      - keepalived
-      - artifact_keeper
+    bundle_profile: cluster
+    bundle_jfrog: true
+    # Both editions by default, so the choice can still be made inside the isolated network.
+    bundle_jfrog_editions:
+      - artifactory-jcr
+      - artifactory-oss
+    bundle_is_cluster: "{{ bundle_profile == 'cluster' }}"
+    bundle_role_defaults_by_profile:
+      cluster:
+        - base
+        - podman
+        - etcd
+        - garage
+        - opensearch
+        - patroni
+        - haproxy
+        - keepalived
+        - artifact_keeper
+      two_vm:
+        - podman
+        - standalone_host
+        - ak_standalone
+        - artifactory_oss
+        - artifactory_migration
+    bundle_role_defaults: "{{ bundle_role_defaults_by_profile[bundle_profile] }}"
     # Installed on the offline control node from the bundle (see tools/install-control-node.sh).
     bundle_control_node_packages:
       - ansible-core
@@ -35,6 +56,7 @@
       - createrepo_c
       - dnf-plugins-core
       - podman
+      - skopeo
       - tar
     bundle_gpg_key_patterns:
       - RPM-GPG-KEY-Rocky-*
@@ -62,7 +84,7 @@
         ak_firewall_zone: ak-cluster
         ak_offline: false
 
-    - name: Assemble bundle contents
+    - name: Assemble bundle contents of the cluster
       ansible.builtin.set_fact:
         bundle_packages: >-
           {{ (base_packages + podman_packages + patroni_packages + haproxy_packages
@@ -73,24 +95,51 @@
           - "{{ opensearch_image }}"
           - "{{ artifact_keeper_backend_image }}"
           - "{{ artifact_keeper_web_image }}"
+      when: bundle_is_cluster
 
-    - name: Install builder tools and the EPEL repository
+    # skopeo copies and compares images during the migration test, nftables keeps outbound
+    # traffic closed (role restricted_host).
+    - name: Assemble bundle contents of the two VM setup
+      vars:
+        bundle_jfrog_images: >-
+          {{ [artifactory_oss_postgres_image]
+             + (bundle_jfrog_editions | map('regex_replace', '^(.*)$', artifactory_oss_registry ~ '/jfrog/\1:' ~ artifactory_oss_version) | list) }}
+      ansible.builtin.set_fact:
+        bundle_packages: >-
+          {{ (podman_packages + standalone_host_packages + bundle_control_node_packages
+              + ['skopeo', 'nftables', 'chrony']) | unique | sort }}
+        bundle_images: >-
+          {{ [ak_standalone_postgres_image, ak_standalone_opensearch_image, ak_standalone_backend_image,
+              ak_standalone_web_image, ak_standalone_caddy_image]
+             + (bundle_jfrog_images if bundle_jfrog | bool else []) }}
+      when: not bundle_is_cluster
+
+    - name: Install builder tools
       become: true
       ansible.builtin.dnf:
-        name: "{{ bundle_builder_packages + [patroni_epel_package] }}"
+        name: "{{ bundle_builder_packages }}"
         state: present
+
+    - name: Install the EPEL repository
+      become: true
+      ansible.builtin.dnf:
+        name: "{{ patroni_epel_package }}"
+        state: present
+      when: bundle_is_cluster
 
     - name: Import PGDG signing key
       become: true
       ansible.builtin.rpm_key:
         key: "{{ patroni_pgdg_gpg_key_url }}"
         state: present
+      when: bundle_is_cluster
 
     - name: Install PGDG repository
       become: true
       ansible.builtin.dnf:
         name: "{{ patroni_pgdg_repo_rpm_url }}"
         state: present
+      when: bundle_is_cluster
 
     - name: Create bundle directories
       become: true
@@ -179,6 +228,46 @@
         creates: "{{ bundle_dir }}/images/{{ item | regex_replace('[/:@]', '_') }}.tar"
       loop: "{{ bundle_images }}"
 
+    # Test data for the migration inside the isolated network (two VM setup with JFrog only).
+    # The "dir" format keeps manifests byte for byte, so digests stay comparable.
+    - name: Create directories for test data
+      ansible.builtin.file:
+        path: "{{ bundle_dir }}/seed/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - images
+        - files
+      when: not bundle_is_cluster and bundle_jfrog | bool
+
+    - name: Copy test images into the bundle
+      vars:
+        bundle_seed_name: "{{ item.source | regex_replace('[/:@]', '_') }}"
+      ansible.builtin.shell:
+        cmd: >-
+          set -e;
+          rm -rf {{ bundle_seed_name }};
+          skopeo copy --quiet --retry-times=3 --multi-arch={{ 'all' if item.multi_arch | default(false) else 'system' }}
+          docker://{{ item.source }} dir:{{ bundle_seed_name }};
+          tar -cf {{ bundle_seed_name }}.tar {{ bundle_seed_name }};
+          rm -rf {{ bundle_seed_name }}
+        chdir: "{{ bundle_dir }}/seed/images"
+        creates: "{{ bundle_dir }}/seed/images/{{ bundle_seed_name }}.tar"
+      loop: "{{ artifactory_migration_images }}"
+      loop_control:
+        label: "{{ item.source }}"
+      when: not bundle_is_cluster and bundle_jfrog | bool
+
+    - name: Download test files into the bundle
+      ansible.builtin.get_url:
+        url: "{{ item.url }}"
+        dest: "{{ bundle_dir }}/seed/files/{{ item.path | basename }}"
+        mode: "0644"
+      loop: "{{ artifactory_migration_downloads }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      when: not bundle_is_cluster and bundle_jfrog | bool
+
     - name: Download Ansible collections
       ansible.builtin.command: >-
         ansible-galaxy collection download
@@ -197,7 +286,8 @@
         dest: "{{ bundle_dir }}/MANIFEST.yml"
         mode: "0644"
         content: |
-          # Offline bundle for the Artifact Keeper HA cluster
+          # Offline bundle for Artifact Keeper, profile {{ bundle_profile }}
+          profile: {{ bundle_profile }}
           created: {{ ansible_facts['date_time']['iso8601'] }}
           builder: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}
           packages:

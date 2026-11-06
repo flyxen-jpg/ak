@@ -1,0 +1,46 @@
+---
+# Environment settings: isolated network, software from the bundle, JFrog on a foreign server.
+ak_offline: true
+ak_bundle_dir: /srv/ak-bundle
+ak_cluster_network: 192.168.56.0/24
+
+standalone_artifactory_enabled: false
+standalone_host_min_free_gb: 15
+
+# The foreign JFrog. Enter its address here and its password in the vault
+# (vault_external_jfrog_password). If it is in another network, add that network to
+# restricted_host_egress_allow, because all other outbound traffic stays closed.
+external_jfrog_host: 192.168.56.30
+external_jfrog_port: 8082
+external_jfrog_url: "http://{{ external_jfrog_host }}:{{ external_jfrog_port }}"
+external_jfrog_user: admin
+restricted_host_egress_allow: []
+
+# Artifact Keeper: the address clients use. The registry derives its token address from it.
+ak_external_url: "http://192.168.56.31:30080"
+ak_standalone_external_url: "{{ ak_external_url }}"
+ak_standalone_ssrf_allow_private_cidrs: "{{ external_jfrog_host }}/32"
+
+# Migration, run on the control VM. Nothing is written to the source.
+artifactory_migration_ak_url: "{{ ak_external_url }}"
+artifactory_migration_rt_url: "{{ external_jfrog_url }}"
+artifactory_migration_rt_user: "{{ external_jfrog_user }}"
+artifactory_migration_source_url: "{{ external_jfrog_url }}/artifactory"
+artifactory_migration_registry_host: "{{ external_jfrog_host }}:{{ external_jfrog_port }}"
+
+# Repositories to transfer: adjust to the content of the foreign JFrog.
+artifactory_migration_repos:
+  - docker-base
+  - docker-prod
+  - helm-local
+  - generic-tools
+artifactory_migration_verify_skip_repos:
+  - docker-base
+  - docker-prod
+artifactory_migration_verify_endpoints:
+  helm-local: helm
+  generic-tools: general
+# Images to compare are read from the source instead of a fixed list.
+artifactory_migration_discover_docker_repos:
+  - docker-base
+  - docker-prod

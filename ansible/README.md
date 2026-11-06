@@ -70,6 +70,8 @@ ansible-playbook -i inventories/virtualbox-offline/hosts.yml playbooks/site.yml
 
 Vorbereitung, Voraussetzungen und Testergebnis beschreibt `../docs/09-offline.md`.
 
+Ein kleiner Testaufbau mit zwei VMs in einer restriktiven Umgebung steht in `../docs/13-airgap-zwei-vms.md`, mit JFrog auf einer der VMs (`inventories/airgap-jfrog`) oder auf einem fremden Server (`inventories/airgap-external`). Dazu gehören das Bundle Profil `two_vm`, das Playbook `playbooks/airgap.yml` und die Rolle `restricted_host`. Die Speicherwerte der Rolle `artifactory_oss` begründet `../docs/14-jfrog-tuning.md`.
+
 ## Aufbau
 
 ```text
@@ -78,6 +80,8 @@ requirements.yml       fest eingetragene Collections (ansible.posix)
 inventories/
   virtualbox-online/   VirtualBox-Labor mit Internet
   virtualbox-offline/  VirtualBox-Labor ohne Internet, Installation aus dem Bundle
+  airgap-jfrog/        zwei VMs ohne Internet, JFrog auf einer davon
+  airgap-external/     zwei VMs ohne Internet, JFrog auf einem fremden Server
   airgapped/           Vorlage für beliebige Hypervisoren oder Bare Metal ohne Internet
   standalone/          ein Host, reines NAT, Ansible lokal auf dem Host
   natnetwork/          Hochverfügbarkeit im NAT-Netzwerk, gesteuert von einer Management-VM

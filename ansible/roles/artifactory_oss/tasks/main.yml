@@ -79,17 +79,32 @@
     XDG_RUNTIME_DIR: "/run/user/{{ podman_user_uid }}"
   loop: "{{ artifactory_oss_units }}"
 
-# Artifactory (Java, several micro services) needs 2 to 5 minutes for its first start.
-- name: Wait until Artifactory reports healthy
+# Order of a start as measured in the lab: the router first, then all services, directly after
+# that the REST API and the registry. The router alone says nothing about the others, so the
+# wait covers all of them. Short timeouts keep a stalled request from eating the waiting time.
+- name: Wait until all services report healthy
   ansible.builtin.uri:
     url: "http://127.0.0.1:{{ artifactory_oss_http_port }}/router/api/v1/system/health"
     return_content: true
+    timeout: 5
   register: artifactory_oss_health
   until:
-    - artifactory_oss_health.status == 200
+    - artifactory_oss_health.status | default(0) == 200
     - artifactory_oss_health.json.router.state | default('') == 'HEALTHY'
-  retries: 90
-  delay: 5
+    - artifactory_oss_health.json.services | default([]) | length > 0
+    - artifactory_oss_health.json.services | default([]) | rejectattr('state', 'equalto', 'HEALTHY') | list | length == 0
+  retries: "{{ artifactory_oss_wait_retries }}"
+  delay: "{{ artifactory_oss_wait_delay }}"
+
+- name: Wait until the REST API answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ artifactory_oss_http_port }}/artifactory/api/system/ping"
+    return_content: true
+    timeout: 5
+  register: artifactory_oss_ping
+  until: artifactory_oss_ping.content | default('') == 'OK'
+  retries: "{{ artifactory_oss_wait_retries }}"
+  delay: "{{ artifactory_oss_wait_delay }}"
 
 - name: Import admin password tasks
   ansible.builtin.import_tasks: admin_password.yml
@@ -97,3 +112,25 @@
 - name: Import license agreement tasks
   ansible.builtin.import_tasks: eula.yml
   when: artifactory_oss_edition == 'artifactory-jcr'
+
+# With JFConnect enabled the login stalls for 180 seconds after every start (see defaults).
+# Waiting here with a short timeout means later tasks need no long timeouts. REST API and
+# registry are not affected, so this can be skipped when only they count.
+- name: Wait until the login of the web interface answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ artifactory_oss_http_port }}/ui/api/v1/ui/auth/login"
+    method: POST
+    body_format: json
+    body:
+      user: "{{ artifactory_oss_admin_user }}"
+      password: "{{ artifactory_oss_admin_password }}"
+      type: login
+    headers:
+      X-Requested-With: XMLHttpRequest
+    timeout: 8
+  register: artifactory_oss_ui_login
+  until: artifactory_oss_ui_login.status | default(0) == 200
+  retries: "{{ artifactory_oss_wait_retries }}"
+  delay: "{{ artifactory_oss_wait_delay }}"
+  no_log: true
+  when: artifactory_oss_wait_for_ui | bool

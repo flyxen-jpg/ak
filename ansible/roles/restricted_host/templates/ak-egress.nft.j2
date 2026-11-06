@@ -1,0 +1,21 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+# Every blocked packet is counted and logged, so "nft list table inet ak_egress" and
+# "journalctl -k -g ak-egress" show what a program tried to reach.
+table inet ak_egress
+delete table inet ak_egress
+table inet ak_egress {
+  chain output {
+    type filter hook output priority filter; policy drop;
+    oif "lo" accept
+    ct state established,related accept
+    ip daddr {{ restricted_host_egress_local }} accept
+{% for network in restricted_host_egress_allow %}
+    ip daddr {{ network }} accept
+{% endfor %}
+    # Container networks of rootless Podman stay inside the host.
+    ip daddr 10.89.0.0/16 accept
+    ip6 daddr fe80::/10 accept
+    counter log prefix "ak-egress-drop " drop
+  }
+}

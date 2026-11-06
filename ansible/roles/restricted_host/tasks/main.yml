@@ -1,0 +1,21 @@
+---
+- name: Import isolation check
+  ansible.builtin.import_tasks: isolation.yml
+  when: restricted_host_check_isolation | bool
+
+- name: Import time configuration
+  ansible.builtin.import_tasks: time.yml
+
+- name: Import hardening rules
+  ansible.builtin.import_tasks: harden.yml
+  when: restricted_host_harden | bool
+
+- name: Import outbound rules
+  ansible.builtin.import_tasks: egress.yml
+  when: restricted_host_egress | bool
+
+- name: Check SELinux
+  ansible.builtin.assert:
+    that: ansible_facts['selinux']['status'] == 'enabled' and ansible_facts['selinux']['mode'] == 'enforcing'
+    fail_msg: SELinux must be enforcing, found {{ ansible_facts['selinux'] }}.
+    quiet: true

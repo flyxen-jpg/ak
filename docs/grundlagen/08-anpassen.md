@@ -1,6 +1,6 @@
 # 8 Was sich anpassen lässt
 
-[Zurück: Ansible](07-ansible.md) | [Übersicht Grundlagen](README.md)
+[Zurück: Ansible](07-ansible.md) | [Übersicht Grundlagen](README.md) | [Weiter: Ohne Internet](09-airgap.md)
 
 Änderungen gehören ins Inventory der eigenen Umgebung und nicht in die Rollen. So bleiben Rollen für alle Umgebungen gleich. Am einfachsten kopiert man `inventories/natnetwork` und passt die Kopie an.
 

@@ -1,0 +1,33 @@
+---
+- name: Install chrony
+  become: true
+  ansible.builtin.dnf:
+    name: chrony
+    state: present
+
+- name: Configure chrony
+  become: true
+  ansible.builtin.template:
+    src: chrony.conf.j2
+    dest: /etc/chrony.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: restricted_host_chrony
+
+- name: Start chrony
+  become: true
+  ansible.builtin.systemd_service:
+    name: chronyd
+    state: "{{ 'restarted' if restricted_host_chrony is changed else 'started' }}"
+    enabled: true
+
+- name: Open the time service
+  become: true
+  ansible.posix.firewalld:
+    zone: public
+    service: ntp
+    permanent: true
+    immediate: true
+    state: enabled
+  when: restricted_host_time_allow | length > 0

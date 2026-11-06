@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+# This file was created from the role: {{ ansible_role_name }}
+{% for server in restricted_host_time_servers %}
+server {{ server }} iburst
+{% endfor %}
+{% if restricted_host_time_servers | length == 0 %}
+# No source outside: this host is the reference for the isolated network.
+local stratum 10
+{% endif %}
+{% for network in restricted_host_time_allow %}
+allow {{ network }}
+{% endfor %}
+driftfile /var/lib/chrony/drift
+makestep 1.0 3
+rtcsync
+logdir /var/log/chrony

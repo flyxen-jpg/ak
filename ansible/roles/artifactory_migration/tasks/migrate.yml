@@ -80,6 +80,21 @@
       {{ artifactory_migration_source_list | selectattr('key', 'in', artifactory_migration_repos)
          | selectattr('package_type', 'in', artifactory_migration_unsupported_types) | map(attribute='key') | list }}
 
+# An account with limited rights only sees part of the source. The job then ends with status
+# "completed" and 0 failures although repositories are missing (found in the lab test).
+- name: Stop when requested repositories are not visible to the account
+  vars:
+    artifactory_migration_invisible: >-
+      {{ artifactory_migration_repos
+         | difference(artifactory_migration_selected + artifactory_migration_unsupported) }}
+  ansible.builtin.assert:
+    that: artifactory_migration_invisible | length == 0 or artifactory_migration_allow_invisible_repos | bool
+    fail_msg: >-
+      The source does not list {{ artifactory_migration_invisible | join(', ') }} for account
+      {{ artifactory_migration_rt_user }}. Check the name and the rights of the account, or set
+      artifactory_migration_allow_invisible_repos to true to migrate only the visible ones.
+    quiet: true
+
 - name: Report repositories that cannot be migrated
   ansible.builtin.debug:
     msg: >-
@@ -118,6 +133,7 @@
       config: >-
         {{ {'include_repos': artifactory_migration_selected,
             'include_cached_remote': true,
+            'exclude_paths': artifactory_migration_exclude_paths,
             'conflict_resolution': 'skip',
             'concurrent_transfers': artifactory_migration_concurrent_transfers,
             'throttle_delay_ms': 0,
@@ -161,10 +177,32 @@
         Failed: {{ (artifactory_migration_failed.json['items'] | default([])) | map(attribute='source_path')
         | list | unique | join(', ') | default('none', true) }}
 
-- name: Fail when the job did not finish
+# Artifactory writes cache files below .jfrog in Docker repositories when a client uses the
+# catalog API. They are listed but cannot be downloaded, so these items always fail. They hold
+# no artifacts and are created again on demand. The option exclude_paths has no effect in
+# Artifact Keeper 1.11.11 (tested). A job consisting only of such items ends as "failed".
+- name: Separate failures of internal cache files
+  ansible.builtin.set_fact:
+    artifactory_migration_failed_cache: >-
+      {{ (artifactory_migration_failed.json['items'] | default([])) | map(attribute='source_path')
+         | select('search', artifactory_migration_cache_pattern) | list }}
+    artifactory_migration_failed_real: >-
+      {{ (artifactory_migration_failed.json['items'] | default([])) | map(attribute='source_path')
+         | reject('search', artifactory_migration_cache_pattern) | list }}
+
+- name: Report failures of internal cache files
+  ansible.builtin.debug:
+    msg: "{{ artifactory_migration_failed_cache | length }} failed items are internal cache files below .jfrog. They hold no artifacts."
+  when: artifactory_migration_failed_cache | length > 0
+
+- name: Fail when the job did not finish or real files are missing
   ansible.builtin.assert:
-    that: artifactory_migration_status.json.status in ['completed', 'completed_with_errors', 'partial']
+    that:
+      - artifactory_migration_status.json.status in ['completed', 'completed_with_errors', 'partial']
+        or (artifactory_migration_failed_cache | length > 0 and artifactory_migration_failed_real | length == 0)
+      - artifactory_migration_failed_real | length == 0 or artifactory_migration_allow_failed_items | bool
     fail_msg: >-
-      Migration job ended with status {{ artifactory_migration_status.json.status }}:
+      Migration job ended with status {{ artifactory_migration_status.json.status }},
+      failed files: {{ artifactory_migration_failed_real | join(', ') }}.
       {{ artifactory_migration_status.json.error_summary | default('') }}
     quiet: true

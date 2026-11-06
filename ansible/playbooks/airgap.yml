@@ -1,0 +1,55 @@
+---
+# Two VM setup in an isolated network, with the bundle as the only source of software.
+#   ansible-playbook -i inventories/airgap-jfrog/hosts.yml playbooks/airgap.yml      JFrog on one VM
+#   ansible-playbook -i inventories/airgap-external/hosts.yml playbooks/airgap.yml   JFrog elsewhere
+# Runs without any change on a host that already has the setup.
+- name: Prepare the hosts
+  hosts: all
+  gather_facts: true
+  roles:
+    - role: offline_repo
+      when: ak_offline | bool
+      tags: [offline_repo]
+    - role: restricted_host
+      tags: [restricted_host]
+    - role: standalone_host
+      tags: [standalone_host]
+
+- name: Install JFrog
+  hosts: artifactory
+  gather_facts: false
+  roles:
+    - role: artifactory_oss
+      tags: [artifactory]
+
+- name: Install Artifact Keeper
+  hosts: artifact_keeper_host
+  gather_facts: false
+  roles:
+    - role: ak_standalone
+      tags: [artifact_keeper]
+
+- name: Check the result
+  hosts: all
+  gather_facts: false
+  tags: [verify]
+  tasks:
+    - name: Check time synchronisation
+      ansible.builtin.command: chronyc -n tracking
+      register: airgap_tracking
+      changed_when: false
+
+    - name: Show time source
+      ansible.builtin.debug:
+        msg: "{{ airgap_tracking.stdout_lines[:3] }}"
+
+    - name: Read blocked outbound packets
+      become: true
+      ansible.builtin.command: nft list chain inet ak_egress output
+      register: airgap_egress
+      changed_when: false
+      failed_when: false
+
+    - name: Show blocked outbound packets
+      ansible.builtin.debug:
+        msg: "{{ airgap_egress.stdout_lines | select('search', 'counter') | list }}"

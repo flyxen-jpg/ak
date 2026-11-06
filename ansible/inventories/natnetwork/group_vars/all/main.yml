@@ -37,11 +37,10 @@ ak_oidc_env:
   OIDC_AUTO_CREATE_USERS: "true"
   OIDC_ADMIN_GROUP: platform-admins
 
-# Migration source on the quorum node: JFrog Container Registry, smaller heap, port open in
-# the cluster zone. The EULA of JFrog is accepted for this lab instance only.
+# Migration source on the quorum node: JFrog Container Registry, port open in the cluster zone.
+# The EULA of JFrog is accepted for this lab instance only.
 artifactory_oss_edition: artifactory-jcr
 artifactory_oss_accept_eula: true
-artifactory_oss_java_opts: "-Xms512m -Xmx1024m"
 artifactory_oss_firewall_zones:
   - "{{ ak_firewall_zone }}"
   - public

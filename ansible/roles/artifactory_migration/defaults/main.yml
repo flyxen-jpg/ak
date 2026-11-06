@@ -32,6 +32,14 @@ artifactory_migration_repos:
 artifactory_migration_unsupported_types:
   - gradle
   - Gradle
+# A repository that the account of the source cannot see stops the play (see tasks/migrate.yml).
+artifactory_migration_allow_invisible_repos: false
+# Path parts to leave out of the job. Artifact Keeper 1.11.11 accepts this and ignores it.
+artifactory_migration_exclude_paths: []
+# Internal cache files of Artifactory, reported separately when they fail (tasks/migrate.yml).
+artifactory_migration_cache_pattern: '(^|/)\.jfrog/'
+# Failed files outside the cache stop the play. Set to true to only report them.
+artifactory_migration_allow_failed_items: false
 artifactory_migration_concurrent_transfers: 4
 # Maximum wait for one migration job (seconds).
 artifactory_migration_timeout: 3600
@@ -93,6 +101,9 @@ artifactory_migration_password_file: /root/ak-migrated-users.txt
 # therefore also exercises manifest lists, the other images are copied for linux/amd64 only.
 artifactory_migration_registry_host: "127.0.0.1:8082"
 artifactory_migration_image_timeout: 1800
+# Docker repositories whose tags are read from the source for the comparison. Empty: the fixed
+# list below is compared. Used when the source is a foreign server.
+artifactory_migration_discover_docker_repos: []
 artifactory_migration_images:
   - { source: docker.io/library/alpine:3.21.3, repo: docker-base, name: alpine, multi_arch: true }
   - { source: docker.io/library/alpine:3.20.6, repo: docker-base, name: alpine }
@@ -201,6 +212,30 @@ artifactory_migration_jcr_permissions:
           docker-prod:
             include_patterns: ["**"]
             exclude_patterns: ["data/**"]
+  # Rights add up across targets in Artifactory. These two must become one rule with read and
+  # write in Artifact Keeper, which allows one rule per group and repository.
+  - name: tools-read
+    resources:
+      artifact:
+        actions:
+          users: {}
+          groups:
+            team-payments: [READ]
+        targets:
+          generic-tools:
+            include_patterns: ["**"]
+            exclude_patterns: []
+  - name: tools-write
+    resources:
+      artifact:
+        actions:
+          users: {}
+          groups:
+            team-payments: [READ, WRITE]
+        targets:
+          generic-tools:
+            include_patterns: ["**"]
+            exclude_patterns: []
 
 # Test data (lab only, playbooks/artifactory_seed.yml).
 artifactory_migration_seed_dir: /var/tmp/artifactory-seed

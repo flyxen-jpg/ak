@@ -22,8 +22,37 @@ artifactory_oss_subnet: 10.89.41.0/24
 artifactory_oss_ip: 10.89.41.10
 
 artifactory_oss_config_dir: /etc/artifactory
-# Java heap. 1.2 GB is enough for evaluation; production installations use 4 GB and more.
-artifactory_oss_java_opts: "-Xms512m -Xmx1200m"
+
+# Memory profile for test systems, measured in docs/14-jfrog-tuning.md. A VM with 3 GB is enough
+# for evaluation and migration tests. Production installations use the defaults of JFrog, so
+# set artifactory_oss_small to false there and size the heap with artifactory_oss_java_opts.
+# JFrog runs five JVMs. Without a limit four of them take 25 percent of the memory each.
+artifactory_oss_small: true
+# Compiling with C1 only saves memory and start time and costs throughput under long load.
+artifactory_oss_jvm_small: "-XX:TieredStopAtLevel=1 -Xss512k"
+# Artifactory and jfbus have -XX:+UseG1GC fixed in their start scripts. A second collector such
+# as SerialGC makes the JVM refuse to start, so these two limit the threads of G1 instead.
+artifactory_oss_java_opts: >-
+  {{ '-Xms256m -Xmx640m -XX:ParallelGCThreads=2 -XX:ConcGCThreads=1 -XX:ReservedCodeCacheSize=96m -XX:MaxDirectMemorySize=128m '
+     ~ artifactory_oss_jvm_small if artifactory_oss_small | bool else '-Xms512m -Xmx2g' }}
+artifactory_oss_access_java_opts: "-Xms64m -Xmx192m -XX:+UseSerialGC -XX:ReservedCodeCacheSize=48m {{ artifactory_oss_jvm_small }}"
+artifactory_oss_jfbus_java_opts: "-Xms32m -Xmx96m -XX:ParallelGCThreads=1 -XX:ConcGCThreads=1 -XX:ReservedCodeCacheSize=32m {{ artifactory_oss_jvm_small }}"
+artifactory_oss_helper_java_opts: "-Xms32m -Xmx96m -XX:+UseSerialGC -XX:ReservedCodeCacheSize=32m {{ artifactory_oss_jvm_small }}"
+
+# The free editions contain no JFConnect service, yet the frontend asks it for entitlements for
+# three minutes after every start, and the login of the web interface waits for that. Switching
+# it off removes this wait. Licensed editions fetch their entitlements through JFConnect, so
+# keep it enabled there (air-gapped: jfconnect.airgap.enabled, see the documentation of JFrog).
+artifactory_oss_jfconnect_enabled: false
+
+# Further settings of the JFrog services as environment variables.
+artifactory_oss_extra_env: {}
+
+# Waiting for a start: attempts and seconds between them, for each step of the wait.
+artifactory_oss_wait_retries: 90
+artifactory_oss_wait_delay: 5
+# Wait for the login of the web interface too. The migration of rights needs it.
+artifactory_oss_wait_for_ui: true
 
 # Artifactory starts with admin / "password". The role replaces it with
 # artifactory_oss_admin_password (vault) right after the first start.

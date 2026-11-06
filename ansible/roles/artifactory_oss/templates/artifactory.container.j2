@@ -18,6 +18,9 @@ PublishPort={{ artifactory_oss_http_port }}:{{ artifactory_oss_http_port }}
 # so no chown on the host is needed (the original bundle requires config.sh for that).
 Volume=artifactory-data:/var/opt/jfrog/artifactory
 Ulimit=nofile=32000:40000
+# Without this Podman kills the container after 10 seconds. Artifactory then finds its lock
+# file at the next start ("not shutdown properly").
+StopTimeout=100
 HealthCmd=["curl","-fsS","-m","8","http://localhost:{{ artifactory_oss_http_port }}/router/api/v1/system/health"]
 HealthInterval=30s
 HealthTimeout=10s

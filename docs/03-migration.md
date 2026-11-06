@@ -66,7 +66,7 @@ Ein Registry Client holt sein Token von der Adresse, die Artifact Keeper in der 
 * Die Quelle wird über AQL aufgelistet und per HTTP geladen. Die Prüfsummen werden gegen die Werte der Quelle geprüft (`verify_checksums`).
 * Docker Repositories werden formatgerecht behandelt. Der Worker erkennt Blobs (`sha256__...`) und Manifeste (`manifest.json`, `list.manifest.json`) und trägt sie in die OCI Tabellen ein, damit `docker pull` funktioniert (`classify_oci_source_artifact`, `migration_worker.rs:4402`).
 * Der Job läuft auf dem Knoten, der die Startanfrage erhält.
-* Es gibt die Jobtypen `assessment`, `full` und `incremental`. Zu den Optionen zählen `dry_run`, `include_repos`, `exclude_repos`, `exclude_paths`, `repo_mappings`, `conflict_resolution`, `concurrent_transfers`, `throttle_delay_ms`, `date_from` und `date_to`.
+* Es gibt die Jobtypen `assessment`, `full` und `incremental`. Zu den Optionen zählen `dry_run`, `include_repos`, `exclude_repos`, `exclude_paths`, `repo_mappings`, `conflict_resolution`, `concurrent_transfers`, `throttle_delay_ms`, `date_from` und `date_to`. `exclude_paths` wird angenommen, wirkt aber nicht, siehe [13](13-airgap-zwei-vms.md).
 * `incremental` ist ein Zeitfilter auf die AQL Abfrage mit Duplikaterkennung über SHA-256. Identische Dateien werden übersprungen, geänderte erneut übertragen.
 * Eine Quelle in einem privaten Netz muss für den SSRF Schutz freigegeben sein: `AK_SSRF_ALLOW_PRIVATE_CIDRS=<adresse-der-quelle>`.
 * `MIGRATION_ENCRYPTION_KEY` verschlüsselt die gespeicherten Zugangsdaten der Quelle. Der Wert muss auf allen Knoten gleich sein.

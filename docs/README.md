@@ -1,6 +1,6 @@
 # Evaluierung: Ablösung von JFrog Artifactory durch Artifact Keeper
 
-Stand 4. November 2026. Geprüft mit Artifact Keeper 1.11.11, JFrog Container Registry und Artifactory OSS 7.161.26, Keycloak 26.1.4, Rocky Linux 10.2 und Podman 5.8.2.
+Stand 6. November 2026. Geprüft mit Artifact Keeper 1.11.11, JFrog Container Registry und Artifactory OSS 7.161.26, Keycloak 26.1.4, Rocky Linux 10.2 und Podman 5.8.2.
 
 ## Auftrag und Ausgangslage
 
@@ -22,6 +22,8 @@ Artifact Keeper kann Artifactory ablösen, wenn Rechte auf Ebene der Repositorie
 | Harter Ausfall eines Knotens | etwa 36 bis 44 Sekunden Unterbrechung, danach selbstständig wieder im Betrieb |
 | Rolling Update | 0 Fehler |
 | Installation | vollständig mit Ansible auf frischem Rocky Linux, online und offline |
+| Zwei VMs ohne Internet, gehärtet | Installation, Migration und alle Prüfungen bestanden, siehe [13](13-airgap-zwei-vms.md) |
+| Start von JFrog auf einer 3 GB VM | bereit nach etwa 80 statt 299 Sekunden, 33 Prozent weniger Speicher, siehe [14](14-jfrog-tuning.md) |
 
 ## Fragen aus Sicht der Leitung
 
@@ -63,6 +65,12 @@ Nein. Ein von Hand installiertes Rocky Linux 10 Minimal und Ansible genügen. Vi
 **Geht das ohne Internet?**
 Ja, über ein Offline Bundle. Siehe [09](09-offline.md).
 
+**Wie teste ich das auf einem restriktiven System mit nur zwei VMs?**
+Dafür gibt es zwei Varianten, beide ohne Gateway, DNS und Internet, mit SELinux, gesperrten temporären Verzeichnissen und geschlossenem Ausgang. In Variante A läuft JFrog auf einer der zwei VMs. In Variante B steht JFrog auf einem fremden Server und wird nur über Netz und Konto angesprochen. Schritt für Schritt in [13](13-airgap-zwei-vms.md).
+
+**Warum startet JFrog so langsam und braucht so viel Speicher?**
+JFrog betreibt fünf JVMs, und die Anmeldung wartet 180 Sekunden auf einen Dienst, den die freien Editionen gar nicht enthalten. Die Rolle behebt beides für Testsysteme: Bereit nach etwa 80 statt 299 Sekunden, 2,2 statt 3,3 GB. Messreihe und Grenzen in [14](14-jfrog-tuning.md).
+
 **Wie sicher sind unsere Images nach dem Umzug?**
 Der Vergleich ist unabhängig vom Migrator. Der Digest jedes Manifests wird auf beiden Seiten verglichen, danach wird jedes Image komplett aus dem Ziel geladen. `playbooks/migrate.yml --tags verify_images` wiederholt das jederzeit.
 
@@ -101,6 +109,7 @@ Im Ordner [Grundlagen](grundlagen/README.md). Er setzt kein Vorwissen voraus und
 7. Die REST API für Downloads ist bei S3 auf 30 Anfragen pro Minute und Adresse begrenzt, die nativen Endpunkte nicht.
 8. MinIO liefert keine Community Images mehr, als S3 Speicher dient deshalb Garage.
 9. Erst die Automatisierung auf frischen VMs brachte weitere Fehler ans Licht. Die Liste steht in [08](08-ansible.md).
+10. Die freien JFrog Editionen warten nach jedem Start 180 Sekunden auf den fehlenden Dienst JFConnect. `JF_JFCONNECT_ENABLED=false` beseitigt das, siehe [14](14-jfrog-tuning.md).
 
 ## Inhalt
 
@@ -119,13 +128,15 @@ Im Ordner [Grundlagen](grundlagen/README.md). Er setzt kein Vorwissen voraus und
 | [10 Einzelknoten](10-einzelknoten.md) | Installation auf einer einzelnen Rocky VM |
 | [11 NAT Netzwerk](11-nat-netzwerk.md) | Hochverfügbarkeit auf von Hand installierten VMs mit Management VM |
 | [12 Rechte und Identitäten](12-rechte-und-identitaeten.md) | Warum Gruppen und Rechte nicht migriert werden, Modellvergleich, Keycloak, Nachstellen |
+| [13 Airgap mit zwei VMs](13-airgap-zwei-vms.md) | Restriktiver Testaufbau ohne Internet, mit eigenem oder fremdem JFrog, Schritt für Schritt |
+| [14 JFrog Optimierung](14-jfrog-tuning.md) | Speicher und Wartezeiten von JCR und OSS, Messreihe, Ursachen, Quellen |
 
 ## Aufbau des Repositorys
 
 ```text
 docs/        diese Dokumentation
 ansible/     Ansible Projekt für Cluster, Quelle, Migration und Keycloak (siehe ansible/README.md)
-  tools/evidence/  Skripte, die die Befunde aus Kapitel 12 nachstellen
+  tools/evidence/  Skripte, die die Befunde aus den Kapiteln 12 bis 14 nachstellen
 podman/      Compose Dateien für einen Einzelknoten und Testskripte
 lab/         Skripte der ersten Testphase und Rohdaten unter lab/results/
 vm/          Labor Skripte für den Windows Host, für die Lösung nicht erforderlich

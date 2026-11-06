@@ -1,0 +1,37 @@
+---
+# Requirements of a restrictive environment, applied and checked on every host of the two VM
+# setup. Each block can be switched off when the organization solves it elsewhere.
+
+# Stops the play when a host can reach the outside, because every later result would then
+# say nothing about the isolated network.
+restricted_host_check_isolation: true
+# Addresses and names that must not be reachable from an isolated host.
+restricted_host_probe_ips:
+  - 1.1.1.1
+  - 9.9.9.9
+restricted_host_probe_names:
+  - releases-docker.jfrog.io
+  - ghcr.io
+
+# Time: without internet one host serves the time to the others. JFrog requires synchronized
+# services for tokens, and Artifact Keeper tokens depend on the clock as well.
+# Leave restricted_host_time_servers empty on the host that serves the time.
+restricted_host_time_servers: []
+restricted_host_time_allow: []
+# Set to the internal NTP servers in production; then no host needs to serve the time.
+restricted_host_time_port: 123
+
+# Typical hardening rules. Each of them was tested with the whole stack.
+restricted_host_harden: true
+restricted_host_tmp_options: nosuid,nodev,noexec
+restricted_host_tmp_size: 512M
+# Default file mode of sudo sessions and login shells.
+restricted_host_umask: "0027"
+
+# Outbound traffic is denied by a table of its own, independent of firewalld. Rootless
+# containers leave through processes of the host and are therefore covered as well.
+restricted_host_egress: true
+# Destination networks that stay allowed besides the local one.
+restricted_host_egress_allow: []
+restricted_host_egress_local: "{{ ak_cluster_network }}"
+restricted_host_egress_file: /etc/nftables/ak-egress.nft

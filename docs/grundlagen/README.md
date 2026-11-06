@@ -16,6 +16,7 @@ Dieser Ordner richtet sich an alle, die die Technik hinter dieser Evaluierung no
 | [6 Benutzer und Rechte](06-identitaeten.md) | Benutzer, Gruppen, Rechte, Identitätsanbieter, OpenID Connect, Keycloak, Tokens | Wer darf was, und woher weiß das System das? |
 | [7 Ansible](07-ansible.md) | Inventory, Playbook, Rolle, Vault, alle Skripte dieses Projekts | Wie wird das alles aufgebaut? |
 | [8 Anpassen](08-anpassen.md) | Häufige Änderungen mit Fundstelle | Was stelle ich wo um? |
+| [9 Ohne Internet](09-airgap.md) | Airgap, Bundle, Signaturen, Zeitquelle, Härtung, JVM und Heap | Wie installiert man etwas in einem abgeschotteten Netz? |
 
 ## Das Gesamtbild
 

@@ -50,7 +50,7 @@ echo 'vm.max_map_count=262144' | sudo tee /etc/sysctl.d/90-opensearch.conf && su
 | `ulimits.nproc: 65535` | entfernt, weil rootless Container das harte Limit des Hosts nicht überschreiten dürfen |
 | `logging: json-file` | entfernt, Podman nutzt journald oder k8s file |
 | Port `5432:5432` veröffentlicht | entfernt |
-| fester Heap | über `ARTIFACTORY_JAVA_OPTS` einstellbar, im Labor `-Xms512m -Xmx1200m` |
+| fester Heap | über `ARTIFACTORY_JAVA_OPTS` einstellbar, im Labor `-Xms512m -Xmx1200m`. Die Ansible Rolle nutzt inzwischen das Profil aus [14](14-jfrog-tuning.md). |
 
 ## Start und Test
 

@@ -8,6 +8,7 @@ Der HA Aufbau aus [04](04-hochverfuegbarkeit.md) ist als Ansible Projekt unter [
 |---|---|---|---|
 | VirtualBox mit Internet | `inventories/virtualbox-online` | Spiegelserver von Rocky, EPEL und PGDG sowie die öffentlichen Registries | auf frischen VMs getestet, ein zweiter Lauf ändert nichts |
 | VirtualBox ohne Internet | `inventories/virtualbox-offline` | Offline Bundle | auf frischen VMs ohne NAT getestet, siehe [09](09-offline.md) |
+| Zwei VMs ohne Internet, gehärtet | `inventories/airgap-jfrog`, `inventories/airgap-external` | Offline Bundle, Profil `two_vm` | auf frischen VMs getestet, siehe [13](13-airgap-zwei-vms.md) |
 | ohne VirtualBox und ohne Internet, etwa VMware, KVM oder Bare Metal | `inventories/airgapped` als Vorlage | Offline Bundle | nicht getestet. Die Rollen sind dieselben wie oben, nur das Inventory unterscheidet sich, siehe Abschnitt „Ohne VirtualBox“. |
 
 Code und Kommentare sind auf Englisch gehalten und erklären jeweils knapp, was eine Aufgabe tut, warum und wie. Eine Kurzreferenz für Entwickler steht in [`ansible/README.md`](../ansible/README.md).

@@ -1,0 +1,36 @@
+---
+# Reads images and tags of the source. The result has the format of artifactory_migration_images,
+# with "source" only carrying the tag. AQL only reads. The Docker catalog API would be the obvious
+# choice, but it makes Artifactory write cache files below .jfrog in the repository (found in the
+# lab test), so it must not be used against a foreign server.
+
+- name: List the manifests of the source
+  ansible.builtin.uri:
+    url: "{{ artifactory_migration_rt_url }}/artifactory/api/search/aql"
+    method: POST
+    url_username: "{{ artifactory_migration_rt_user }}"
+    url_password: "{{ artifactory_migration_rt_password }}"
+    force_basic_auth: true
+    headers:
+      Content-Type: text/plain
+    body: >-
+      items.find({"repo":{"$eq":"{{ item }}"},"type":"file","$or":[{"name":"manifest.json"},{"name":"list.manifest.json"}]}).include("repo","path","name")
+  loop: "{{ artifactory_migration_discover_docker_repos }}"
+  register: artifactory_migration_manifests
+
+# A tag is stored as <image>/<tag>/manifest.json. The platforms of a multi arch image live in
+# folders named sha256:<digest>, internal data below .jfrog.
+- name: Build the list of images to compare
+  ansible.builtin.set_fact:
+    artifactory_migration_discovered_images: >-
+      {%- set out = [] -%}
+      {%- for result in artifactory_migration_manifests.results -%}
+      {%- for file in result.json.results -%}
+      {%- set tag = file.path | regex_replace('^.*/', '') -%}
+      {%- set name = file.path | regex_replace('/[^/]*$', '') -%}
+      {%- if tag is not match('^(sha256|_)') and not file.path.startswith('.jfrog') -%}
+      {%- set _ = out.append({'repo': file.repo, 'name': name, 'source': 'discovered:' ~ tag}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ out | unique }}
